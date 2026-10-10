@@ -35,7 +35,8 @@ export function useChatStore() {
       const data = await AsyncStorage.getItem(SESSIONS_INDEX_KEY);
       return data ? JSON.parse(data) : [];
     } catch (e) {
-      console.error('Failed to load sessions index', e);
+      console.log(`App Alert: Failed to load sessions index: ${e.message}`);
+      alert(`Failed to load sessions index: ${e.message}`);
       return [];
     }
   };
@@ -46,7 +47,8 @@ export function useChatStore() {
       await AsyncStorage.setItem(SESSIONS_INDEX_KEY, JSON.stringify(newIndex));
       setSessions(newIndex);
     } catch (e) {
-      console.error('Failed to save sessions index', e);
+      console.log(`App Alert: Failed to save sessions index: ${e.message}`);
+      alert(`Failed to save sessions index: ${e.message}`);
     }
   };
 
@@ -64,7 +66,8 @@ export function useChatStore() {
       setCurrentSessionId(id);
       setChatLog(loadedLog);
     } catch (e) {
-      console.error('Failed to load session', id, e);
+      console.log(`App Alert: Failed to load session: ${e.message}`);
+      alert(`Failed to load session: ${e.message}`);
     }
   };
 
@@ -108,7 +111,8 @@ export function useChatStore() {
           await saveSessionsIndex(index);
           
         } catch (e) {
-          console.error('Failed to save current session', e);
+          console.log(`App Alert: Failed to save current session: ${e.message}`);
+          alert(`Failed to save current session: ${e.message}`);
         }
       })();
 
@@ -133,7 +137,8 @@ export function useChatStore() {
         }
       }
     } catch (e) {
-      console.error('Failed to delete session', id, e);
+      console.log(`App Alert: Failed to delete session: ${e.message}`);
+      alert(`Failed to delete session: ${e.message}`);
     }
   };
 

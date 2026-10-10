@@ -56,7 +56,10 @@ export default function App() {
     setModelUri(uri);
     try {
       await AsyncStorage.setItem('last_model_uri', uri);
-    } catch(e) {}
+    } catch(e) {
+      console.log(`App Alert: Failed to save last model: ${e.message}`);
+      alert(`Failed to save last model: ${e.message}`);
+    }
     await loadModel(uri);
   };
 
@@ -179,23 +182,33 @@ export default function App() {
       if (!file) file = tree.find(f => f.path.toLowerCase().endsWith('.gguf'));
       if (!file) throw new Error("No .gguf file found in this repo.");
 
+      const expectedSize = file.size;
       const downloadUrl = `https://huggingface.co/${model.id}/resolve/main/${file.path}`;
       const localUri = FileSystem.documentDirectory + file.path.split('/').pop();
 
-      // @ts-ignore - Supress IDE warning (SDK >54 prefers File API but getInfoAsync is perfectly stable)
+      // @ts-ignore
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (fileInfo.exists) {
-        setDownloadStatus(`Found locally. Loading from cache...`);
-        await handleLoadModel(localUri);
-        setIsDownloading(false);
-        return;
+        if (fileInfo.size === expectedSize) {
+          setDownloadStatus(`Found locally. Loading from cache...`);
+          await handleLoadModel(localUri);
+          setIsDownloading(false);
+          return;
+        } else {
+          // It's a partial file. It might be downloading natively in the background, or it was interrupted.
+          // Since we can't safely resume a force-killed download without resumeData in Expo, we delete it to restart.
+          await FileSystem.deleteAsync(localUri, { idempotent: true });
+          setDownloadStatus(`Cleaning up partial download...`);
+        }
       }
 
       setDownloadStatus(`Downloading ${file.path}...`);
       const downloadResumable = FileSystem.createDownloadResumable(
         downloadUrl,
         localUri,
-        {},
+        {
+          sessionType: FileSystem.FileSystemSessionType.BACKGROUND
+        },
         (progress) => {
           const percent = (progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * 100;
           setDownloadProgress(percent);
@@ -206,8 +219,14 @@ export default function App() {
       const result = await downloadResumable.downloadAsync();
 
       if (result && result.uri) {
-        setDownloadStatus(`Download complete! Loading into RAM...`);
-        await handleLoadModel(result.uri);
+        // Double check size just to be bulletproof
+        const finalInfo = await FileSystem.getInfoAsync(result.uri);
+        if (finalInfo.exists && finalInfo.size >= expectedSize * 0.99) {
+          setDownloadStatus(`Download complete! Loading into RAM...`);
+          await handleLoadModel(result.uri);
+        } else {
+          throw new Error("Download completed but file size mismatch. It may have been corrupted.");
+        }
         setIsDownloading(false);
       }
     } catch (err) {

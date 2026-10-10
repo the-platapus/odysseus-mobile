@@ -32,7 +32,10 @@ export function useLlama() {
       
       contextRef.current = ctx;
     } catch (err: any) {
-      setError(err.message || 'Failed to load model');
+      const msg = err.message || 'Failed to load model';
+      console.log(`App Alert: Failed to load model: ${msg}`);
+      alert(`Failed to load model: ${msg}`);
+      setError(msg);
     } finally {
       setIsInitializing(false);
     }
@@ -69,7 +72,10 @@ export function useLlama() {
 
       return result.text;
     } catch (err: any) {
-      setError(err.message || 'Failed to generate response');
+      const msg = err.message || 'Failed to generate response';
+      console.log(`App Alert: Failed to generate response: ${msg}`);
+      alert(`Failed to generate response: ${msg}`);
+      setError(msg);
     } finally {
       setIsGenerating(false);
     }

@@ -65,7 +65,10 @@ export default function CookbookMenu({ onSelectModel }) {
             setError('Offline. No cached models found.');
           }
         } catch (storageErr) {
-          setError(err.message || 'Network error fetching cookbook');
+          const msg = err.message || 'Network error fetching cookbook';
+          console.log(`App Alert: Failed to fetch cookbook: ${msg}`);
+          alert(`Failed to fetch cookbook: ${msg}`);
+          setError(msg);
         }
       } finally {
         setIsLoading(false);
