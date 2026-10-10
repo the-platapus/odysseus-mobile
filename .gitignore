@@ -41,3 +41,7 @@ yarn-error.*
 /android
 
 /build.log
+*.apk
+*.idsig
+*.aab
+*.keystore

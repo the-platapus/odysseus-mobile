@@ -15,10 +15,8 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1b1c1d"
       },
       "package": "com.the_platapus1325.odysseusmobile"
     },
@@ -29,6 +27,12 @@
       "eas": {
         "projectId": "d5cfce01-ccf6-43d7-832d-f99bcfd7a7f4"
       }
+    },
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1b1c1d",
+      "imageWidth": 257
     }
   }
 }
