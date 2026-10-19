@@ -1,5 +1,21 @@
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Modal, Platform, KeyboardAvoidingView, Keyboard } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TextInput,
+  TouchableOpacity,
+  ScrollView,
+  ActivityIndicator,
+  Modal,
+  Platform,
+  KeyboardAvoidingView,
+  Keyboard,
+  Animated,
+  LayoutAnimation,
+  UIManager,
+  Easing,
+} from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { useState, useEffect, useRef } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
@@ -9,6 +25,13 @@ import { useChatStore } from './src/hooks/useChatStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookbookMenu from './src/components/CookbookMenu';
 import theme from './theme.json';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// Clean dampened ease-in / ease-out (smooth, cushioned motion without bounce)
+const dampenedEase = Easing.bezier(0.25, 0.1, 0.25, 1);
 
 const formatTime = (date) => {
   let h = date.getHours();
@@ -48,8 +71,82 @@ export default function App() {
 
   const { isReady, isInitializing, isGenerating, error, loadModel, generate, releaseModel } = useLlama();
 
+  const inputRef = useRef(null);
   const downloadResumableRef = useRef(null);
   const scrollViewRef = useRef(null);
+
+  const menuAnim = useRef(new Animated.Value(0)).current;
+  const sidebarAnim = useRef(new Animated.Value(0)).current;
+  const promptModalAnim = useRef(new Animated.Value(0)).current;
+
+  const toggleMenu = (show) => {
+    const nextVal = typeof show === 'boolean' ? show : !isMenuVisible;
+    if (nextVal) {
+      setIsMenuVisible(true);
+      Animated.timing(menuAnim, {
+        toValue: 1,
+        duration: 200,
+        easing: dampenedEase,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      Animated.timing(menuAnim, {
+        toValue: 0,
+        duration: 150,
+        easing: dampenedEase,
+        useNativeDriver: true,
+      }).start(() => {
+        setIsMenuVisible(false);
+      });
+    }
+  };
+
+  const openSidebar = () => {
+    setIsSidebarVisible(true);
+    Animated.timing(sidebarAnim, {
+      toValue: 1,
+      duration: 240,
+      easing: dampenedEase,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const closeSidebar = () => {
+    Animated.timing(sidebarAnim, {
+      toValue: 0,
+      duration: 180,
+      easing: dampenedEase,
+      useNativeDriver: true,
+    }).start(() => {
+      setIsSidebarVisible(false);
+    });
+  };
+
+  const openPromptModal = () => {
+    setIsSystemPromptModalVisible(true);
+    Animated.timing(promptModalAnim, {
+      toValue: 1,
+      duration: 220,
+      easing: dampenedEase,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const closePromptModal = () => {
+    Animated.timing(promptModalAnim, {
+      toValue: 0,
+      duration: 160,
+      easing: dampenedEase,
+      useNativeDriver: true,
+    }).start(() => {
+      setIsSystemPromptModalVisible(false);
+    });
+  };
+
+  const changeModalTab = (tab) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setModalTab(tab);
+  };
 
 
   const handleLoadModel = async (uri) => {
@@ -115,6 +212,37 @@ export default function App() {
       releaseModel();
     };
   }, []);
+
+  // Auto-scroll when keyboard appears or disappears
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, () => {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 50);
+    });
+
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  // Auto-scroll when new messages appear in chatLog
+  useEffect(() => {
+    if (chatLog.length > 0) {
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 60);
+    }
+  }, [chatLog.length]);
 
   useEffect(() => {
     scanLocalModels();
@@ -240,10 +368,19 @@ export default function App() {
     }
   };
 
+  const handleKeyPress = (e) => {
+    // Only send on Ctrl+Enter or Cmd+Enter from physical keyboards
+    // On virtual keyboards, Enter/Return key always inserts a newline!
+    if (e.nativeEvent.key === 'Enter' && (e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)) {
+      if (inputText.trim() && isReady && !isGenerating) {
+        if (e.preventDefault) e.preventDefault();
+        sendMessage();
+      }
+    }
+  };
+
   const sendMessage = async () => {
     if (!inputText.trim() || !isReady || isGenerating) return;
-
-    Keyboard.dismiss();
 
     const userMsg = inputText.trim();
     setInputText('');
@@ -253,6 +390,14 @@ export default function App() {
 
     const timeStr = formatTime(new Date());
     setChatLog(prev => [...prev, { role: 'user', text: userMsg, time: timeStr }, { role: 'assistant', text: '', time: timeStr }]);
+
+    // Keep input focused so keyboard stays open without dismissal
+    inputRef.current?.focus();
+
+    // Scroll to the new message immediately
+    setTimeout(() => {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }, 50);
 
     // Build context-aware prompt
     let prompt = systemPrompt + "\n\n";
@@ -268,6 +413,7 @@ export default function App() {
         newLog[lastIndex].text += token;
         return newLog;
       });
+      scrollViewRef.current?.scrollToEnd({ animated: false });
     });
   };
 
@@ -275,12 +421,12 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
 
           {/* Minimal Top Bar */}
           <View style={styles.topBar}>
             <View style={styles.logoContainer}>
-              <TouchableOpacity onPress={() => setIsSidebarVisible(true)} style={{ marginRight: 15, padding: 4 }}>
+              <TouchableOpacity onPress={openSidebar} style={{ marginRight: 15, padding: 4 }}>
                 <Text style={{ color: theme.colors.fg, fontSize: 20 }}>☰</Text>
               </TouchableOpacity>
               <Text style={styles.appTitle}>odysseus-mobile</Text>
@@ -298,45 +444,63 @@ export default function App() {
           {/* History Sidebar Modal */}
           <Modal
             visible={isSidebarVisible}
-            animationType="fade"
+            animationType="none"
             transparent={true}
-            onRequestClose={() => setIsSidebarVisible(false)}
+            onRequestClose={closeSidebar}
           >
-            <SafeAreaView style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', flexDirection: 'row' }}>
-              <View style={{ width: '75%', height: '100%', backgroundColor: theme.colors.bg, borderRightWidth: 1, borderColor: theme.colors.border }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', padding: 15, borderBottomWidth: 1, borderColor: theme.colors.border, alignItems: 'center' }}>
-                  <Text style={{ color: theme.colors.fg, fontSize: 16, fontFamily: monoFont, fontWeight: 'bold' }}>Chat History</Text>
-                  <TouchableOpacity onPress={() => setIsSidebarVisible(false)}>
-                    <Text style={{ color: theme.colors.fg, fontSize: 16, fontFamily: monoFont, fontWeight: 'bold' }}>[X]</Text>
+            <Animated.View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', flexDirection: 'row', opacity: sidebarAnim }}>
+              <Animated.View
+                style={{
+                  width: '75%',
+                  height: '100%',
+                  backgroundColor: theme.colors.bg,
+                  borderRightWidth: 1,
+                  borderColor: theme.colors.border,
+                  transform: [
+                    {
+                      translateX: sidebarAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [-300, 0],
+                      }),
+                    },
+                  ],
+                }}
+              >
+                <SafeAreaView style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', padding: 15, borderBottomWidth: 1, borderColor: theme.colors.border, alignItems: 'center' }}>
+                    <Text style={{ color: theme.colors.fg, fontSize: 16, fontFamily: monoFont, fontWeight: 'bold' }}>Chat History</Text>
+                    <TouchableOpacity onPress={closeSidebar}>
+                      <Text style={{ color: theme.colors.fg, fontSize: 16, fontFamily: monoFont, fontWeight: 'bold' }}>[X]</Text>
+                    </TouchableOpacity>
+                  </View>
+                  
+                  <TouchableOpacity 
+                    style={{ margin: 15, padding: 12, backgroundColor: theme.colors.panel, borderRadius: 8, borderWidth: 1, borderColor: theme.colors.border }} 
+                    onPress={() => { createNewSession(); closeSidebar(); }}
+                  >
+                    <Text style={{ color: theme.colors.fg, fontFamily: monoFont, textAlign: 'center', fontWeight: 'bold' }}>+ New Conversation</Text>
                   </TouchableOpacity>
-                </View>
-                
-                <TouchableOpacity 
-                  style={{ margin: 15, padding: 12, backgroundColor: theme.colors.panel, borderRadius: 8, borderWidth: 1, borderColor: theme.colors.border }} 
-                  onPress={() => { createNewSession(); setIsSidebarVisible(false); }}
-                >
-                  <Text style={{ color: theme.colors.fg, fontFamily: monoFont, textAlign: 'center', fontWeight: 'bold' }}>+ New Conversation</Text>
-                </TouchableOpacity>
-                
-                <ScrollView style={{ flex: 1 }}>
-                  {sessions.map(s => (
-                    <View key={s.id} style={{ flexDirection: 'row', padding: 15, borderBottomWidth: 1, borderColor: theme.colors.panel, backgroundColor: currentSessionId === s.id ? theme.colors.panel : 'transparent' }}>
-                      <TouchableOpacity style={{ flex: 1 }} onPress={() => { loadSession(s.id); setIsSidebarVisible(false); }}>
-                        <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 14, fontWeight: currentSessionId === s.id ? 'bold' : 'normal' }} numberOfLines={1}>{s.title}</Text>
-                        <Text style={{ color: theme.colors.border, fontFamily: monoFont, fontSize: 12, marginTop: 4 }}>{new Date(s.updatedAt).toLocaleDateString()}</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity onPress={() => deleteSession(s.id)} style={{ paddingLeft: 10, justifyContent: 'center' }}>
-                        <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[DEL]</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                  {sessions.length === 0 && (
-                     <Text style={{ color: theme.colors.border, fontFamily: monoFont, textAlign: 'center', marginTop: 20 }}>No history yet.</Text>
-                  )}
-                </ScrollView>
-              </View>
-              <TouchableOpacity style={{ flex: 1 }} onPress={() => setIsSidebarVisible(false)} />
-            </SafeAreaView>
+                  
+                  <ScrollView style={{ flex: 1 }}>
+                    {sessions.map(s => (
+                      <View key={s.id} style={{ flexDirection: 'row', padding: 15, borderBottomWidth: 1, borderColor: theme.colors.panel, backgroundColor: currentSessionId === s.id ? theme.colors.panel : 'transparent' }}>
+                        <TouchableOpacity style={{ flex: 1 }} onPress={() => { loadSession(s.id); closeSidebar(); }}>
+                          <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 14, fontWeight: currentSessionId === s.id ? 'bold' : 'normal' }} numberOfLines={1}>{s.title}</Text>
+                          <Text style={{ color: theme.colors.border, fontFamily: monoFont, fontSize: 12, marginTop: 4 }}>{new Date(s.updatedAt).toLocaleDateString()}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => deleteSession(s.id)} style={{ paddingLeft: 10, justifyContent: 'center' }}>
+                          <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[DEL]</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                    {sessions.length === 0 && (
+                       <Text style={{ color: theme.colors.border, fontFamily: monoFont, textAlign: 'center', marginTop: 20 }}>No history yet.</Text>
+                    )}
+                  </ScrollView>
+                </SafeAreaView>
+              </Animated.View>
+              <TouchableOpacity style={{ flex: 1 }} onPress={closeSidebar} />
+            </Animated.View>
           </Modal>
 
           <Modal
@@ -349,10 +513,10 @@ export default function App() {
               {/* Header & Close Button */}
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 15, paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: theme.colors.border }}>
                 <View style={{ flexDirection: 'row', gap: 20 }}>
-                  <TouchableOpacity onPress={() => setModalTab('cookbook')}>
+                  <TouchableOpacity onPress={() => changeModalTab('cookbook')}>
                     <Text style={{ color: modalTab === 'cookbook' ? theme.colors.red : theme.colors.border, fontSize: 16, fontWeight: 'bold', fontFamily: monoFont }}>[DOWNLOADS]</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={() => setModalTab('local')}>
+                  <TouchableOpacity onPress={() => changeModalTab('local')}>
                     <Text style={{ color: modalTab === 'local' ? theme.colors.red : theme.colors.border, fontSize: 16, fontWeight: 'bold', fontFamily: monoFont }}>[MODELS]</Text>
                   </TouchableOpacity>
                 </View>
@@ -429,8 +593,11 @@ export default function App() {
           <ScrollView
             ref={scrollViewRef}
             onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
+            onLayout={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
             style={styles.chatArea}
-            contentContainerStyle={{ paddingBottom: 100 }}
+            contentContainerStyle={{ paddingBottom: 16 }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
           >
             {chatLog.map((msg, index) => (
               <View key={index} style={[styles.messageWrapper, msg.role === 'user' ? styles.userWrapper : styles.assistantWrapper]}>
@@ -452,10 +619,31 @@ export default function App() {
             visible={isSystemPromptModalVisible}
             animationType="fade"
             transparent={true}
-            onRequestClose={() => setIsSystemPromptModalVisible(false)}
+            onRequestClose={closePromptModal}
           >
             <View style={styles.modalOverlay}>
-              <View style={styles.promptModalContent}>
+              <Animated.View
+                style={[
+                  styles.promptModalContent,
+                  {
+                    opacity: promptModalAnim,
+                    transform: [
+                      {
+                        scale: promptModalAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0.93, 1],
+                        }),
+                      },
+                      {
+                        translateY: promptModalAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [10, 0],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
                 <Text style={styles.promptModalTitle}>System Prompt</Text>
                 <TextInput
                   style={styles.promptInput}
@@ -465,23 +653,61 @@ export default function App() {
                 />
                 <TouchableOpacity
                   style={styles.promptSaveBtn}
-                  onPress={() => setIsSystemPromptModalVisible(false)}
+                  onPress={closePromptModal}
                 >
                   <Text style={styles.promptSaveBtnText}>Save</Text>
                 </TouchableOpacity>
-              </View>
+              </Animated.View>
             </View>
           </Modal>
 
-          {/* Floating Input Area */}
+          {/* Backdrop when dropdown menu is visible */}
+          {isMenuVisible && (
+            <Animated.View style={[styles.menuBackdrop, { opacity: menuAnim }]}>
+              <TouchableOpacity
+                style={StyleSheet.absoluteFill}
+                activeOpacity={1}
+                onPress={() => toggleMenu(false)}
+              />
+            </Animated.View>
+          )}
+
+          {/* Input Area */}
           <View style={styles.inputContainer}>
             {/* Dropdown Menu */}
             {isMenuVisible && (
-              <View style={styles.dropdownMenu}>
-                <TouchableOpacity onPress={() => { setIsMenuVisible(false); setIsSystemPromptModalVisible(true); }} style={styles.dropdownItem}>
+              <Animated.View
+                style={[
+                  styles.dropdownMenu,
+                  {
+                    opacity: menuAnim,
+                    transform: [
+                      {
+                        translateY: menuAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [8, 0],
+                        }),
+                      },
+                      {
+                        scale: menuAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0.94, 1],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
+                <TouchableOpacity
+                  onPress={() => {
+                    toggleMenu(false);
+                    openPromptModal();
+                  }}
+                  style={styles.dropdownItem}
+                >
                   <Text style={styles.dropdownItemText}>System Prompt</Text>
                 </TouchableOpacity>
-              </View>
+              </Animated.View>
             )}
             <View style={styles.inputWrapper}>
               <View style={{ flexDirection: 'row', marginBottom: 2, marginLeft: 42 }}>
@@ -495,22 +721,27 @@ export default function App() {
               <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
                 <TouchableOpacity
                   style={styles.plusBtn}
-                  onPress={() => setIsMenuVisible(!isMenuVisible)}
+                  onPress={() => toggleMenu()}
                 >
                   <Text style={styles.plusBtnText}>+</Text>
                 </TouchableOpacity>
                 <TextInput
+                  ref={inputRef}
                   style={styles.input}
                   placeholder={!isReady ? "Load a model first..." : isGenerating ? "Assistant is thinking..." : "Message Odysseus..."}
                   placeholderTextColor={theme.colors.border}
                   value={inputText}
                   onChangeText={setInputText}
-                  editable={isReady && !isGenerating}
+                  onKeyPress={handleKeyPress}
+                  editable={isReady}
                   multiline
                 />
                 <TouchableOpacity
                   style={[styles.sendBtn, (!isReady || isGenerating || !inputText.trim()) && styles.btnDisabled]}
-                  onPress={sendMessage}
+                  onPress={() => {
+                    sendMessage();
+                    inputRef.current?.focus();
+                  }}
                   disabled={!isReady || isGenerating || !inputText.trim()}
                 >
                   <Text style={styles.sendBtnText}>{'↑'}</Text>
@@ -644,10 +875,15 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   inputContainer: {
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
+    paddingHorizontal: 15,
+    paddingTop: 6,
+    paddingBottom: Platform.OS === 'ios' ? 10 : 12,
+    backgroundColor: theme.colors.bg,
+    zIndex: 100,
+  },
+  menuBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 99,
   },
   inputWrapper: {
     flexDirection: 'column',
@@ -749,9 +985,11 @@ const styles = StyleSheet.create({
     padding: 8,
     position: 'absolute',
     bottom: '100%',
-    left: 0,
+    left: 12,
     marginBottom: 8,
     width: 150,
+    zIndex: 101,
+    elevation: 5,
   },
   dropdownItem: {
     paddingVertical: 8,
