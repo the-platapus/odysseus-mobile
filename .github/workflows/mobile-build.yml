@@ -51,12 +51,36 @@ jobs:
   android:
     name: Android APK
     runs-on: ubuntu-24.04
-    # CHANGED: 60 -> 180 minutes. llama.rn compiles llama.cpp from source on Android, once per
+    # CHANGED: 60 -> 240 minutes. llama.rn compiles llama.cpp from source on Android, once per
     # CPU variant (7 for arm64-v8a, 2 for x86_64); that's the ~1h build on a fast PC, and GitHub's
-    # runners for private repos are smaller. Jobs can run up to 6h, so this won't hit an EAS-style
-    # cutoff.
-    timeout-minutes: 180
+    # runners for private repos are smaller (the first run was still building after 1h36m).
+    # Jobs can run up to 6h, so this won't hit an EAS-style cutoff.
+    timeout-minutes: 240
     steps:
+      # CHANGED: new step. The first run died ~1.5h in with "No space left on device": each of the
+      # 9 llama.cpp builds keeps its own object files plus several copies of the libraries, and
+      # the runner's disk is mostly taken by preinstalled toolchains. This deletes the ones this
+      # job never uses (.NET, Haskell, CodeQL, Swift, ...). Android SDK, Java and Node are kept.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/.ghcup \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/share/swift \
+            /usr/local/share/powershell \
+            /usr/local/julia* \
+            /opt/az \
+            /opt/microsoft \
+            /opt/google/chrome \
+            /usr/local/share/chromium \
+            /usr/lib/google-cloud-sdk
+          docker system prune --all --force > /dev/null || true
+          df -h /
+
       - uses: actions/checkout@v7
 
       # CHANGED: npm instead of yarn; this repo has package-lock.json.
@@ -85,6 +109,14 @@ jobs:
       - name: Build release APK
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon --console=plain
+
+      # CHANGED: new step. Logs how much disk the build used and how much is left, so the margin
+      # is visible in the job log (if the disk fills completely, GitHub loses the whole log).
+      - name: Disk usage after build
+        if: always()
+        run: |
+          df -h /
+          du -sh android/app/build node_modules/llama.rn/android/.cxx node_modules/llama.rn/android/build ~/.gradle 2>/dev/null || true
 
       # CHANGED: checks llama.rn's libraries instead of wavpack/wtransport, and that the 32-bit
       # ABIs dropped in app.config.js are really gone.
