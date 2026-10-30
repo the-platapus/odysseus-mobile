@@ -19,6 +19,7 @@ This is that experiment: a local LLM chat app that fits in your pocket, built wi
 - **Model library.** See your downloaded models, switch between them and delete the ones you're done with. The last model you used reloads when you open the app.
 - **Chat history.** Keep multiple conversations, saved on the device.
 - **Custom system prompt.** Change how the assistant behaves.
+- **Agent mode with MCP tools.** The model can call tools through the [Model Context Protocol](https://modelcontextprotocol.io), using llama.cpp's native tool calling with each model's own chat template. Built in: file tools (in a private workspace, or a phone folder you pick) and a memory the model can save facts to. You can also connect remote MCP servers over Streamable HTTP. Tools that change something ask you first.
 
 ## Requirements
 
@@ -51,14 +52,30 @@ Where everything else lives:
 
 - **[MODELS]** (in the Cookbook) lists your downloaded models and has **Pick & Load Model (.gguf)** for importing your own file.
 - **☰** (top left) opens your chat history and **+ New Conversation**.
-- **+** (next to the message box) opens the menu with **System Prompt**.
+- **+** (next to the message box) opens the menu with **System Prompt** and **Tools (MCP)**.
+- **agent: off** (above the message box, right) switches agent mode on and off. Long-press it to open **Tools (MCP)**.
+
+## Agent mode and MCP tools
+
+The tool layer follows the MCP design of the Odysseus desktop app. Each MCP server's tools are offered to the model as `mcp__<server>__<tool>`. A tool that only reads runs straight away. One that changes something shows **[ALLOW]**, **[ALLOW IN CHAT]** and **[DENY]** in the chat first. You can switch each server and each tool on or off under **Tools (MCP)**.
+
+| Server | Tools |
+|---|---|
+| **Built-in: Files** | `list_directory`, `read_file`, `write_file`, `edit_file`, `create_directory`, `delete_path`, `search_files` |
+| **Built-in: Memory** | `manage_memory` (list, add, edit, delete, search) |
+| **Remote** (added under **[ADD]**) | Whatever the server offers. It must speak MCP over Streamable HTTP. An access token is sent as a bearer token. |
+
+- **Files** work inside the app's private workspace by default. **[FILES] → [IMPORT FILES]** copies files from your phone into it. **[PICK PHONE FOLDER]** points the tools at a real folder on the phone instead. Paths can't leave that folder.
+- **Which models work:** models whose chat template supports tools (Qwen 2.5/3, Llama 3.x Instruct, Hermes and others) call tools natively. Other models with a Jinja template fall back to llama.cpp's generic JSON tool format. That works, but small models are worse at it. Models with no chat template can't use agent mode; the tools pill says so.
+- **Limits:** an agent turn has up to 5 tool rounds, then the model has to answer. Each tool result is capped at 4,000 characters before the model sees it. The ■ button stops a turn.
+- **Remote servers:** Android release builds only allow `https://`. A plain `http://` address (a server on your LAN, say) only works in development builds.
 
 ## Good to know
 
-- The context window is 2,048 tokens. Each reply is capped at 256 tokens and ends at the first blank line, so long answers get cut short.
-- Prompts use a plain `User:` / `Assistant:` format instead of each model's own chat template, so some models answer better than others.
+- The context window is 4,096 tokens. In normal chat, each reply is capped at 256 tokens and ends at the first blank line, so long answers get cut short. Agent mode replies can run to 1,024 tokens.
+- Normal chat prompts use a plain `User:` / `Assistant:` format instead of each model's own chat template, so some models answer better than others. Agent mode uses the model's own chat template.
 - RAM estimates come from the parameter count in the model's name (like `3B`). Models without one show "Unknown".
-- The internet is only used to fetch the Cookbook list and download models.
+- The internet is only used to fetch the Cookbook list, download models, and talk to any remote MCP servers you add.
 
 ## Building from source
 
@@ -112,8 +129,14 @@ It waits for the build to finish, converts the newest `.aab` into a universal AP
 |---|---|
 | `App.js` | Main screen: chat, downloads, model library, history and system prompt |
 | `src/components/CookbookMenu.js` | Hardware-aware model catalog from Hugging Face |
-| `src/hooks/useLlama.ts` | Loads models and generates replies with llama.rn |
+| `src/hooks/useLlama.ts` | Loads models and generates replies with llama.rn, including tool-calling rounds |
 | `src/hooks/useChatStore.js` | Saves conversations on the device |
+| `src/hooks/useMcp.ts` | MCP settings and live server state for the UI |
+| `src/mcp/` | The MCP framework: protocol, server, client, transports, `McpManager`, agent loop |
+| `src/mcp/builtin/` | Built-in MCP servers (files, memory) |
+| `src/mcp/expoAdapters.ts`, `src/mcp/runtime.ts` | Device storage and file access for MCP, plus the app-wide manager and its settings |
+| `src/components/McpPanel.js` | The Tools (MCP) screen: servers, adding a server, the files folder |
+| `src/components/ToolCallCard.js` | Tool calls and approval prompts in the chat |
 | `theme.json` | Colours |
 | `app.config.js` | Limits Android builds to `arm64-v8a` and `x86_64` |
 | `.github/workflows/mobile-build.yml` | CI builds and GitHub Releases |

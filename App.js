@@ -17,13 +17,19 @@ import {
   Easing,
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useLlama } from './src/hooks/useLlama';
 import { useChatStore } from './src/hooks/useChatStore';
+import { useMcp } from './src/hooks/useMcp';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookbookMenu from './src/components/CookbookMenu';
+import McpPanel from './src/components/McpPanel';
+import ToolCallCard from './src/components/ToolCallCard';
+import { runAgentTurn, buildAgentSystemPrompt, trimHistory } from './src/mcp/agentLoop';
+import { chatLogToMessages } from './src/mcp/chatLog';
+import { setAgentMode } from './src/mcp/runtime';
 import theme from './theme.json';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -32,6 +38,10 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 
 // Clean dampened ease-in / ease-out (smooth, cushioned motion without bounce)
 const dampenedEase = Easing.bezier(0.25, 0.1, 0.25, 1);
+
+// Characters of earlier conversation sent with an agent turn (~1.5k tokens), leaving room in
+// the 4k context for tool schemas, tool results and the reply.
+const AGENT_HISTORY_CHARS = 6000;
 
 const formatTime = (date) => {
   let h = date.getHours();
@@ -68,8 +78,20 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState('You are a helpful assistant running natively on a phone.');
   const [isMenuVisible, setIsMenuVisible] = useState(false);
   const [isSystemPromptModalVisible, setIsSystemPromptModalVisible] = useState(false);
+  const [isMcpVisible, setIsMcpVisible] = useState(false);
+  const [isAgentRunning, setIsAgentRunning] = useState(false);
+  const [pendingApprovalIds, setPendingApprovalIds] = useState(() => new Set());
 
-  const { isReady, isInitializing, isGenerating, error, loadModel, generate, releaseModel } = useLlama();
+  const { isReady, isInitializing, isGenerating, error, toolSupport, loadModel, generate, chat, stop, releaseModel } = useLlama();
+  const mcp = useMcp();
+  const isBusy = isGenerating || isAgentRunning;
+
+  // Agent turn bookkeeping: tool-call id -> resolver of its approval prompt, tool names the
+  // user allowed for the whole chat, the stop flag, and a token for the running turn.
+  const approvalResolversRef = useRef(new Map());
+  const chatApprovalsRef = useRef(new Set());
+  const stopRequestedRef = useRef(false);
+  const activeAgentRunRef = useRef(null);
 
   const inputRef = useRef(null);
   const downloadResumableRef = useRef(null);
@@ -372,15 +394,144 @@ export default function App() {
     // Only send on Ctrl+Enter or Cmd+Enter from physical keyboards
     // On virtual keyboards, Enter/Return key always inserts a newline!
     if (e.nativeEvent.key === 'Enter' && (e.nativeEvent.ctrlKey || e.nativeEvent.metaKey)) {
-      if (inputText.trim() && isReady && !isGenerating) {
+      if (inputText.trim() && isReady && !isBusy) {
         if (e.preventDefault) e.preventDefault();
         sendMessage();
       }
     }
   };
 
+  const clearPendingApprovals = useCallback((approved) => {
+    for (const resolve of approvalResolversRef.current.values()) resolve(approved);
+    approvalResolversRef.current.clear();
+    setPendingApprovalIds(new Set());
+  }, []);
+
+  const resolveApproval = (id, approved, allowToolForChat) => {
+    const resolve = approvalResolversRef.current.get(id);
+    if (!resolve) return;
+    approvalResolversRef.current.delete(id);
+    setPendingApprovalIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    if (allowToolForChat) chatApprovalsRef.current.add(allowToolForChat);
+    resolve(approved);
+  };
+
+  const stopGeneration = useCallback(async () => {
+    stopRequestedRef.current = true;
+    clearPendingApprovals(false);
+    try {
+      await stop();
+    } catch (e) {
+      console.log(`App Alert: Failed to stop: ${e.message}`);
+    }
+  }, [clearPendingApprovals, stop]);
+
+  // Approvals given "for this chat" end with the chat, and so does a running agent turn, so
+  // its remaining events can't land in the chat being opened.
+  useEffect(() => {
+    chatApprovalsRef.current = new Set();
+    if (activeAgentRunRef.current) {
+      activeAgentRunRef.current = null;
+      stopGeneration();
+    }
+  }, [currentSessionId, stopGeneration]);
+
+  const updateLastAssistant = (patch) => setChatLog(prev => {
+    const next = [...prev];
+    for (let i = next.length - 1; i >= 0; i--) {
+      if (next[i].role === 'assistant') {
+        next[i] = { ...next[i], ...patch };
+        break;
+      }
+    }
+    return next;
+  });
+
+  const updateToolEntry = (id, patch) =>
+    setChatLog(prev => prev.map(entry => (entry.role === 'tool' && entry.id === id ? { ...entry, ...patch } : entry)));
+
+  // Agent mode: the agent loop drives llama.rn with the MCP tools and reports each step,
+  // which becomes assistant bubbles and tool cards in the chat log.
+  const runAgent = async (userMsg, currentLog) => {
+    const run = {};
+    activeAgentRunRef.current = run;
+    const isLive = () => activeAgentRunRef.current === run;
+    stopRequestedRef.current = false;
+    setIsAgentRunning(true);
+
+    const system = buildAgentSystemPrompt(systemPrompt, mcp.manager, mcp.disabled);
+    const messages = trimHistory(chatLogToMessages([...currentLog, { role: 'user', text: userMsg }], system), AGENT_HISTORY_CHARS);
+
+    const onEvent = (event) => {
+      if (!isLive()) return;
+      const time = formatTime(new Date());
+      switch (event.type) {
+        case 'round_start':
+          if (event.round > 1) setChatLog(prev => [...prev, { role: 'assistant', text: '', time }]);
+          break;
+        case 'content':
+          updateLastAssistant({ text: event.text });
+          scrollViewRef.current?.scrollToEnd({ animated: false });
+          break;
+        case 'assistant':
+          updateLastAssistant(event.toolCalls.length ? { text: event.content, toolCalls: event.toolCalls } : { text: event.content });
+          break;
+        case 'tool_call':
+          setChatLog(prev => [...prev, {
+            role: 'tool',
+            id: event.call.id,
+            name: event.call.name,
+            args: event.call.rawArgs,
+            status: event.needsApproval ? 'approval' : 'running',
+            time,
+          }]);
+          break;
+        case 'tool_running':
+          updateToolEntry(event.id, { status: 'running' });
+          break;
+        case 'tool_result':
+          updateToolEntry(event.id, {
+            status: event.denied ? 'denied' : event.result.isError ? 'error' : 'done',
+            output: event.result.output,
+          });
+          break;
+      }
+    };
+
+    try {
+      await runAgentTurn({
+        complete: chat,
+        manager: mcp.manager,
+        messages,
+        disabled: mcp.disabled,
+        requestApproval: (call) => new Promise(resolve => {
+          if (stopRequestedRef.current || !isLive()) return resolve(false);
+          approvalResolversRef.current.set(call.id, resolve);
+          setPendingApprovalIds(prev => new Set(prev).add(call.id));
+        }),
+        isPreApproved: (call) => chatApprovalsRef.current.has(call.name),
+        isStopped: () => stopRequestedRef.current || !isLive(),
+        onEvent,
+      });
+    } catch (err) {
+      const msg = err.message || 'Agent turn failed';
+      console.log(`App Alert: Agent turn failed: ${msg}`);
+      alert(`Agent turn failed: ${msg}`);
+    } finally {
+      if (isLive()) {
+        activeAgentRunRef.current = null;
+        clearPendingApprovals(false);
+      }
+      setIsAgentRunning(false);
+    }
+  };
+
   const sendMessage = async () => {
-    if (!inputText.trim() || !isReady || isGenerating) return;
+    if (!inputText.trim() || !isReady || isBusy) return;
 
     const userMsg = inputText.trim();
     setInputText('');
@@ -399,9 +550,14 @@ export default function App() {
       scrollViewRef.current?.scrollToEnd({ animated: true });
     }, 50);
 
-    // Build context-aware prompt
+    if (mcp.settings.agentMode && toolSupport !== 'none') {
+      await runAgent(userMsg, currentLog);
+      return;
+    }
+
+    // Build context-aware prompt (tool cards and empty tool-calling turns from agent mode are skipped)
     let prompt = systemPrompt + "\n\n";
-    currentLog.forEach(msg => {
+    currentLog.filter(msg => (msg.role === 'user' || msg.role === 'assistant') && msg.text).forEach(msg => {
       prompt += (msg.role === 'user' ? 'User: ' : 'Assistant: ') + msg.text + "\n";
     });
     prompt += `User: ${userMsg}\nAssistant:`;
@@ -535,7 +691,7 @@ export default function App() {
                   <TouchableOpacity
                     style={[styles.modelBtn, { marginBottom: 20 }, isInitializing && styles.btnDisabled]}
                     onPress={() => { setIsCookbookVisible(false); pickModel(); }}
-                    disabled={isInitializing || isGenerating}
+                    disabled={isInitializing || isBusy}
                   >
                     {isInitializing ? (
                       <ActivityIndicator color={theme.colors.fg} />
@@ -599,20 +755,48 @@ export default function App() {
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
           >
-            {chatLog.map((msg, index) => (
-              <View key={index} style={[styles.messageWrapper, msg.role === 'user' ? styles.userWrapper : styles.assistantWrapper]}>
-                <View style={styles.messageHeader}>
-                  <Text style={[styles.messageSender, { color: msg.role === 'user' ? theme.colors.fg : '#6bc46d' }]}>
-                    • {msg.role === 'user' ? 'You' : (modelUri ? decodeURIComponent(modelUri.split('/').pop()) : 'Assistant')}
-                    {msg.time && <Text style={{ color: theme.colors.border, fontWeight: 'normal' }}>  {msg.time}</Text>}
+            {chatLog.map((msg, index) => {
+              if (msg.role === 'tool') {
+                return (
+                  <ToolCallCard
+                    key={index}
+                    entry={msg}
+                    canApprove={pendingApprovalIds.has(msg.id)}
+                    onApprove={() => resolveApproval(msg.id, true)}
+                    onApproveForChat={() => resolveApproval(msg.id, true, msg.name)}
+                    onDeny={() => resolveApproval(msg.id, false)}
+                  />
+                );
+              }
+              // A round that only called tools has no text; its tool cards stand in for it.
+              if (msg.role === 'assistant' && !msg.text && msg.toolCalls?.length) return null;
+              return (
+                <View key={index} style={[styles.messageWrapper, msg.role === 'user' ? styles.userWrapper : styles.assistantWrapper]}>
+                  <View style={styles.messageHeader}>
+                    <Text style={[styles.messageSender, { color: msg.role === 'user' ? theme.colors.fg : '#6bc46d' }]}>
+                      • {msg.role === 'user' ? 'You' : (modelUri ? decodeURIComponent(modelUri.split('/').pop()) : 'Assistant')}
+                      {msg.time && <Text style={{ color: theme.colors.border, fontWeight: 'normal' }}>  {msg.time}</Text>}
+                    </Text>
+                  </View>
+                  <Text style={styles.messageText} selectable={true}>
+                    {msg.text || (isBusy && index === chatLog.length - 1 ? "..." : "")}
                   </Text>
                 </View>
-                <Text style={styles.messageText} selectable={true}>
-                  {msg.text || (isGenerating && index === chatLog.length - 1 ? "..." : "")}
-                </Text>
-              </View>
-            ))}
+              );
+            })}
           </ScrollView>
+
+          {/* MCP Tools Modal */}
+          <Modal
+            visible={isMcpVisible}
+            animationType="slide"
+            presentationStyle="pageSheet"
+            onRequestClose={() => setIsMcpVisible(false)}
+          >
+            <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
+              <McpPanel onClose={() => setIsMcpVisible(false)} toolSupport={toolSupport} isModelReady={isReady} />
+            </SafeAreaView>
+          </Modal>
 
           {/* System Prompt Modal */}
           <Modal
@@ -707,16 +891,43 @@ export default function App() {
                 >
                   <Text style={styles.dropdownItemText}>System Prompt</Text>
                 </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => {
+                    toggleMenu(false);
+                    setIsMcpVisible(true);
+                  }}
+                  style={styles.dropdownItem}
+                >
+                  <Text style={styles.dropdownItemText}>Tools (MCP)</Text>
+                </TouchableOpacity>
               </Animated.View>
             )}
             <View style={styles.inputWrapper}>
-              <View style={{ flexDirection: 'row', marginBottom: 2, marginLeft: 42 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2, marginLeft: 42, marginRight: 4 }}>
                 <View style={[styles.modelPill, { borderWidth: 0, paddingHorizontal: 0, paddingVertical: 0, backgroundColor: 'transparent', height: 16 }]}>
                   <Text style={[styles.modelPillText, { fontSize: 10, color: theme.colors.border }]} numberOfLines={1}>
                     {modelUri ? decodeURIComponent(modelUri.split('/').pop()) : 'No Model Loaded'}
                   </Text>
                   <Text style={[styles.modelPillIcon, { fontSize: 8 }]}>v</Text>
                 </View>
+                {/* Tap toggles agent mode, long-press opens the tool settings */}
+                <TouchableOpacity
+                  onPress={() => setAgentMode(!mcp.settings.agentMode)}
+                  onLongPress={() => setIsMcpVisible(true)}
+                  disabled={isBusy}
+                  hitSlop={8}
+                >
+                  <Text
+                    style={[styles.modelPillText, { fontSize: 10, marginRight: 0, color: mcp.settings.agentMode && toolSupport !== 'none' ? '#6bc46d' : theme.colors.border }]}
+                    numberOfLines={1}
+                  >
+                    {!mcp.settings.agentMode
+                      ? 'agent: off'
+                      : isReady && toolSupport === 'none'
+                        ? 'agent: no tool support'
+                        : `agent · ${mcp.enabledToolCount} tools`}
+                  </Text>
+                </TouchableOpacity>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
                 <TouchableOpacity
@@ -728,7 +939,7 @@ export default function App() {
                 <TextInput
                   ref={inputRef}
                   style={styles.input}
-                  placeholder={!isReady ? "Load a model first..." : isGenerating ? "Assistant is thinking..." : "Message Odysseus..."}
+                  placeholder={!isReady ? "Load a model first..." : isBusy ? "Assistant is thinking..." : "Message Odysseus..."}
                   placeholderTextColor={theme.colors.border}
                   value={inputText}
                   onChangeText={setInputText}
@@ -736,15 +947,20 @@ export default function App() {
                   editable={isReady}
                   multiline
                 />
+                {/* While generating (or an agent turn runs) this is the stop button */}
                 <TouchableOpacity
-                  style={[styles.sendBtn, (!isReady || isGenerating || !inputText.trim()) && styles.btnDisabled]}
+                  style={[styles.sendBtn, !isBusy && (!isReady || !inputText.trim()) && styles.btnDisabled]}
                   onPress={() => {
+                    if (isBusy) {
+                      stopGeneration();
+                      return;
+                    }
                     sendMessage();
                     inputRef.current?.focus();
                   }}
-                  disabled={!isReady || isGenerating || !inputText.trim()}
+                  disabled={!isBusy && (!isReady || !inputText.trim())}
                 >
-                  <Text style={styles.sendBtnText}>{'↑'}</Text>
+                  <Text style={styles.sendBtnText}>{isBusy ? '■' : '↑'}</Text>
                 </TouchableOpacity>
               </View>
             </View>
