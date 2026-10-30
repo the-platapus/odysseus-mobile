@@ -1,12 +1,15 @@
-// The model download in progress, kept on disk so it can be resumed after the app is closed or
+// Model downloads in progress, kept on disk so they can be resumed after the app is closed or
 // the connection drops. A download is written to "<name>.gguf.part" and renamed only once its
 // size matches exactly, so a half-downloaded file can never look like a finished model.
+// Several can run at once, so each is stored under its own key, by the file it ends up as.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 
-const PENDING_DOWNLOAD_KEY = 'pending_download_v1';
+const PENDING_DOWNLOAD_PREFIX = 'pending_download_v2:';
+// Before downloads could run side by side there was at most one, under this key.
+const LEGACY_PENDING_DOWNLOAD_KEY = 'pending_download_v1';
 
 export type PendingDownload = {
   url: string;
@@ -19,30 +22,67 @@ export type PendingDownload = {
 
 export const partUriFor = (finalUri: string) => `${finalUri}.part`;
 
+const keyFor = (finalUri: string) => PENDING_DOWNLOAD_PREFIX + finalUri;
+
 export async function savePendingDownload(download: PendingDownload) {
-  await AsyncStorage.setItem(PENDING_DOWNLOAD_KEY, JSON.stringify(download));
+  await AsyncStorage.setItem(keyFor(download.finalUri), JSON.stringify(download));
 }
 
-export async function clearPendingDownload() {
-  await AsyncStorage.removeItem(PENDING_DOWNLOAD_KEY);
+export async function clearPendingDownload(finalUri: string) {
+  await AsyncStorage.removeItem(keyFor(finalUri));
 }
 
-/** The interrupted download and how much of it is on disk, or null if there's none to resume. */
-export async function loadPendingDownload(): Promise<(PendingDownload & { bytesOnDisk: number }) | null> {
-  let pending: PendingDownload;
+let legacyMigrated = false;
+
+async function migrateLegacyPendingDownload() {
+  if (legacyMigrated) return;
+  const raw = await AsyncStorage.getItem(LEGACY_PENDING_DOWNLOAD_KEY);
+  if (raw) {
+    try {
+      await savePendingDownload(JSON.parse(raw));
+    } catch {
+      // unreadable: nothing to carry over
+    }
+    await AsyncStorage.removeItem(LEGACY_PENDING_DOWNLOAD_KEY);
+  }
+  legacyMigrated = true;
+}
+
+/**
+ * The interrupted downloads and how much of each is on disk. Records without a part file are
+ * dropped, except for downloads that `isActive` says are running: those may not have written
+ * their first bytes yet.
+ */
+export async function loadPendingDownloads(
+  isActive: (finalUri: string) => boolean
+): Promise<(PendingDownload & { bytesOnDisk: number })[]> {
+  let entries: readonly (readonly [string, string | null])[];
   try {
-    const raw = await AsyncStorage.getItem(PENDING_DOWNLOAD_KEY);
-    if (!raw) return null;
-    pending = JSON.parse(raw);
+    await migrateLegacyPendingDownload();
+    const keys = (await AsyncStorage.getAllKeys()).filter(key => key.startsWith(PENDING_DOWNLOAD_PREFIX));
+    entries = await AsyncStorage.multiGet(keys);
   } catch {
-    return null;
+    return [];
   }
-  const info = await FileSystem.getInfoAsync(pending.partUri);
-  if (!info.exists) {
-    await clearPendingDownload();
-    return null;
+  const pending: (PendingDownload & { bytesOnDisk: number })[] = [];
+  for (const [key, raw] of entries) {
+    let download: PendingDownload;
+    try {
+      download = JSON.parse(raw ?? '');
+    } catch {
+      await AsyncStorage.removeItem(key);
+      continue;
+    }
+    const info = await FileSystem.getInfoAsync(download.partUri);
+    // Asked after the wait, so a download that started meanwhile counts as running.
+    if (isActive(download.finalUri)) continue;
+    if (!info.exists) {
+      await AsyncStorage.removeItem(key);
+      continue;
+    }
+    pending.push({ ...download, bytesOnDisk: info.size ?? 0 });
   }
-  return { ...pending, bytesOnDisk: info.size ?? 0 };
+  return pending;
 }
 
 /**

@@ -38,7 +38,7 @@ import { setAgentMode } from './src/mcp/runtime';
 import { COMFORTABLE_RAM_SHARE, pickGgufFile } from './src/cookbook/ggufPicker';
 import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
 import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad } from './src/diagnostics/loadDiagnostics';
-import { clearPendingDownload, loadPendingDownload, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
+import { clearPendingDownload, loadPendingDownloads, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
 import { displayToolName } from './src/mcp/manager';
 import { addWorkActionListener, dismissFinishedWork, startWork, stopWork, updateWork } from './modules/background-work';
 import theme from './theme.json';
@@ -111,12 +111,13 @@ export default function App() {
   } = useChatStore();
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
 
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState(0);
-  const [downloadStatus, setDownloadStatus] = useState('');
-  const [isPaused, setIsPaused] = useState(false);
-  // A download that was cut off, resumable from the Models tab.
-  const [pendingDownload, setPendingDownload] = useState(null);
+  // Downloads in progress, each with its own row in the Models tab: { id, finalUri, phase, progress, status }.
+  const [downloads, setDownloads] = useState([]);
+  const isDownloading = downloads.length > 0;
+  // Downloads that were cut off, resumable from the Models tab. One that's running again shows
+  // as a running download instead.
+  const [pendingDownloads, setPendingDownloads] = useState([]);
+  const interruptedDownloads = pendingDownloads.filter(p => !downloads.some(d => d.finalUri === p.finalUri));
   const [isCookbookVisible, setIsCookbookVisible] = useState(false);
   const [modalTab, setModalTab] = useState('cookbook');
   const [localModels, setLocalModels] = useState([]);
@@ -163,9 +164,14 @@ export default function App() {
       cookbookHintRef.current?.show(pageX, pageY);
     },
   };
-  const downloadResumableRef = useRef(null);
-  // The model and file being downloaded, for when the download finishes (directly or after a resume).
-  const currentDownloadRef = useRef(null);
+  // Each download's working state by id: its model and file, its DownloadResumable, its phase
+  // ('querying', 'downloading', 'paused', 'loading') and the bytes written so far.
+  const downloadsRef = useRef(new Map());
+  const nextDownloadIdRef = useRef(0);
+  // Whether the downloads' notification is up (Android; see syncDownloadWork).
+  const downloadWorkStartedRef = useRef(false);
+  // Model loads waiting their turn (see handleLoadModel).
+  const modelLoadQueueRef = useRef(Promise.resolve());
   // Latest values for callbacks that outlive a render (AppState changes, notification buttons).
   const latestRef = useRef({});
   // iOS: a reply was cut off because the app left the screen; the model is reloaded on return.
@@ -248,7 +254,15 @@ export default function App() {
   };
 
 
-  const handleLoadModel = async (uri) => {
+  // One load at a time: downloads that finish together would otherwise load at once, and two
+  // models in RAM can be more than the phone has. The last one to load stays loaded.
+  const handleLoadModel = (uri) => {
+    const load = modelLoadQueueRef.current.then(() => loadModelNow(uri));
+    modelLoadQueueRef.current = load.catch(() => {});
+    return load;
+  };
+
+  const loadModelNow = async (uri) => {
     setModelUri(uri);
     try {
       await AsyncStorage.setItem('last_model_uri', uri);
@@ -305,50 +319,113 @@ export default function App() {
     })().catch(e => console.log(`App Alert: Startup model load failed: ${e.message}`));
   }, []);
 
-  const pauseResumeDownload = async () => {
-    if (!downloadResumableRef.current) return;
-    try {
-      if (isPaused) {
-        setIsPaused(false);
-        setDownloadStatus(`Resuming download...`);
-        const name = currentDownloadRef.current?.model?.name ?? 'model';
-        await startWork('download', { title: `Downloading ${name}`, text: 'Resuming…', progress: downloadProgress });
-        const result = await downloadResumableRef.current.resumeAsync();
-        if (result && result.uri) {
-          await finishDownload(result.uri);
-          setIsDownloading(false);
-        }
-      } else {
-        await downloadResumableRef.current.pauseAsync();
-        // Nothing runs while paused, so don't keep the phone awake for it.
-        stopWork('download');
-        setIsPaused(true);
-        setDownloadStatus('Download paused.');
-      }
-    } catch (e) {
-      stopWork('download');
-      console.log(`App Alert: Failed to toggle pause: ${e.message}`);
-      alert(`Download stopped: ${e.message}\n\nWhat was downloaded is kept, so you can resume it from the list.`);
-      setIsDownloading(false);
-      setIsPaused(false);
+  const patchDownload = (id, patch) =>
+    setDownloads(prev => prev.map(d => (d.id === id ? { ...d, ...patch } : d)));
+
+  const isDownloadActive = (finalUri) => [...downloadsRef.current.values()].some(d => d.finalUri === finalUri);
+
+  // All downloads share one notification (Android): the total of the running ones, or else the
+  // model being loaded once its download is done. `done` is posted when the last one ends.
+  const syncDownloadWork = (done) => {
+    const entries = [...downloadsRef.current.values()];
+    const running = entries.filter(d => d.phase === 'downloading');
+    const loading = entries.find(d => d.phase === 'loading');
+    let content = null;
+    if (running.length > 0) {
+      const written = running.reduce((sum, d) => sum + d.written, 0);
+      const total = running.reduce((sum, d) => sum + d.file.size, 0);
+      content = {
+        title: running.length === 1 ? `Downloading ${running[0].model.name}` : `Downloading ${running.length} models`,
+        text: `${formatGB(written)} of ${formatGB(total)}`,
+        progress: (written / total) * 100,
+      };
+    } else if (loading) {
+      // The notification stays up while the model loads, so loading also isn't cut off.
+      content = { title: `Loading ${loading.model.name}`, text: 'Loading into memory…' };
+    }
+    if (!content) {
+      // Nothing runs while paused, so paused downloads don't keep the phone awake.
+      if (downloadWorkStartedRef.current || done) stopWork('download', done);
+      downloadWorkStartedRef.current = false;
+    } else if (downloadWorkStartedRef.current) {
+      updateWork('download', content);
+    } else {
+      downloadWorkStartedRef.current = true;
+      startWork('download', content);
     }
   };
 
-  const cancelDownload = async () => {
-    if (downloadResumableRef.current) {
+  // Forget a download that finished, failed or was cancelled, and list what it left on disk.
+  const removeDownload = (id, done) => {
+    if (!downloadsRef.current.delete(id)) return;
+    setDownloads(prev => prev.filter(d => d.id !== id));
+    syncDownloadWork(done);
+    scanLocalModels();
+  };
+
+  const failDownload = async (id, err) => {
+    const entry = downloadsRef.current.get(id);
+    if (!entry) return;
+    const cancelled = !!err.message && err.message.toLowerCase().includes('cancel');
+    console.log(`App Alert: Download failed: ${err.message}`);
+    removeDownload(id, isAway() && !cancelled ? { title: 'Download stopped', text: `${entry.model.name}: open the app to resume it.` } : undefined);
+    if (cancelled) return;
+    const pending = entry.finalUri ? await loadPendingDownloads(isDownloadActive).catch(() => []) : [];
+    const resumable = pending.some(p => p.finalUri === entry.finalUri);
+    alert(`Download of ${entry.model.name} failed: ${err.message}${resumable ? '\n\nWhat was downloaded is kept, so you can resume it from the list.' : ''}`);
+  };
+
+  // Runs a download, or a paused one resumed, until it finishes or fails. It also returns when
+  // the download is paused or cancelled: whatever did that has already updated it.
+  const runDownload = async (id, start) => {
+    try {
+      const result = await start();
+      if (result && result.uri) await finishDownload(id, result.uri);
+    } catch (err) {
+      failDownload(id, err);
+    }
+  };
+
+  const pauseResumeDownload = async (id) => {
+    const entry = downloadsRef.current.get(id);
+    if (!entry?.resumable) return;
+    if (entry.phase === 'paused') {
+      entry.phase = 'downloading';
+      patchDownload(id, { phase: 'downloading', status: `Downloading ${entry.file.path}...` });
+      syncDownloadWork();
+      await runDownload(id, () => entry.resumable.resumeAsync());
+    } else if (entry.phase === 'downloading' && !entry.pausing) {
+      entry.pausing = true;
       try {
-        await downloadResumableRef.current.cancelAsync();
-        stopWork('download');
-        await discardPendingDownload(currentDownloadRef.current?.finalUri);
-        setIsDownloading(false);
-        setIsPaused(false);
-        setDownloadStatus('Download cancelled.');
+        await entry.resumable.pauseAsync();
+        entry.phase = 'paused';
+        patchDownload(id, { phase: 'paused', status: `Paused: ${entry.file.path}` });
+        syncDownloadWork();
       } catch (e) {
-        console.log(`App Alert: Failed to cancel download: ${e.message}`);
-        alert(`Failed to cancel download: ${e.message}`);
+        failDownload(id, e);
+      } finally {
+        entry.pausing = false;
       }
     }
   };
+
+  const cancelDownload = async (id) => {
+    const entry = downloadsRef.current.get(id);
+    if (!entry?.resumable || (entry.phase !== 'downloading' && entry.phase !== 'paused')) return;
+    try {
+      await entry.resumable.cancelAsync();
+      // Discarded while still counted as running, so the list never shows it as interrupted.
+      await discardPendingDownload(entry.finalUri);
+      removeDownload(id);
+    } catch (e) {
+      console.log(`App Alert: Failed to cancel download: ${e.message}`);
+      alert(`Failed to cancel download: ${e.message}`);
+    }
+  };
+
+  // The notification's Cancel button, for the downloads it shows: the running ones.
+  const cancelRunningDownloads = () =>
+    Promise.all([...downloadsRef.current].filter(([, d]) => d.phase === 'downloading').map(([id]) => cancelDownload(id)));
 
   // Clean up model from memory when app closes
   useEffect(() => {
@@ -388,9 +465,10 @@ export default function App() {
     }
   }, [chatLog.length]);
 
+  // Downloads re-scan when they end (removeDownload).
   useEffect(() => {
     scanLocalModels();
-  }, [isDownloading]); // Re-scan when download finishes or cancels
+  }, []);
 
   const scanLocalModels = async () => {
     try {
@@ -406,7 +484,7 @@ export default function App() {
         };
       }));
       setLocalModels(fileDetails);
-      setPendingDownload(await loadPendingDownload());
+      setPendingDownloads(await loadPendingDownloads(isDownloadActive));
     } catch (e) {
       console.log(`App Alert: Failed to scan local models: ${e.message}`);
       alert(`Failed to scan local models: ${e.message}`);
@@ -444,10 +522,12 @@ export default function App() {
   // Shared by a straight download and one resumed after a pause. The size must match
   // exactly: even a slightly short GGUF fails to load. Only then does the .part file get the
   // model's real name, so the Models list never shows a half-downloaded file.
-  const finishDownload = async (uri) => {
-    const { model, file, finalUri } = currentDownloadRef.current ?? {};
+  const finishDownload = async (id, uri) => {
+    const entry = downloadsRef.current.get(id);
+    if (!entry) return;
+    const { model, file, finalUri } = entry;
     const info = await FileSystem.getInfoAsync(uri);
-    if (file?.size && (!info.exists || info.size !== file.size)) {
+    if (!info.exists || info.size !== file.size) {
       const got = info.exists ? formatGB(info.size) : '0 GB';
       // Bigger than expected means the server ignored the resume and sent the whole file
       // again after the part already on disk: that file can't be repaired.
@@ -455,50 +535,43 @@ export default function App() {
       throw new Error(`The download is incomplete (${got} of ${formatGB(file.size)}).`);
     }
     let modelPath = uri;
-    if (finalUri && uri !== finalUri) {
+    if (uri !== finalUri) {
       await FileSystem.moveAsync({ from: uri, to: finalUri });
       modelPath = finalUri;
     }
-    await clearPendingDownload();
-    setPendingDownload(null);
-    if (model && file) {
-      await recordModelSource(modelPath, { origin: model.recommended ? 'recommended' : 'cookbook', repo: model.id, path: file.path, expectedSize: file.size });
-    }
-    setDownloadStatus(`Download complete! Loading into RAM...`);
-    // The download's notification stays up while the model loads, so loading also isn't cut off.
-    updateWork('download', { title: `Loading ${model?.name ?? 'model'}`, text: 'Loading into memory…' });
+    await clearPendingDownload(finalUri);
+    await recordModelSource(modelPath, { origin: model.recommended ? 'recommended' : 'cookbook', repo: model.id, path: file.path, expectedSize: file.size });
+    entry.phase = 'loading';
+    patchDownload(id, { phase: 'loading', progress: 100, status: `Loading ${file.path.split('/').pop()} into RAM...` });
+    syncDownloadWork();
     const loaded = await handleLoadModel(modelPath);
-    stopWork('download', isAway()
+    removeDownload(id, isAway()
       ? loaded
-        ? { title: 'Model ready', text: `${model?.name ?? 'The model'} is downloaded and loaded.` }
-        : { title: 'Model downloaded', text: `${model?.name ?? 'The model'} downloaded but didn't load. Open the app for details.` }
+        ? { title: 'Model ready', text: `${model.name} is downloaded and loaded.` }
+        : { title: 'Model downloaded', text: `${model.name} downloaded but didn't load. Open the app for details.` }
       : undefined);
   };
 
   // Delete what was downloaded so far and forget the interrupted download.
   const discardPendingDownload = async (finalUri) => {
-    const pending = await loadPendingDownload();
-    const partUri = pending?.partUri ?? (finalUri ? partUriFor(finalUri) : null);
-    if (partUri) await FileSystem.deleteAsync(partUri, { idempotent: true });
-    await clearPendingDownload();
-    setPendingDownload(null);
+    await FileSystem.deleteAsync(partUriFor(finalUri), { idempotent: true });
+    await clearPendingDownload(finalUri);
+    setPendingDownloads(prev => prev.filter(p => p.finalUri !== finalUri));
   };
 
   // Continue an interrupted download: the same repo and exactly the same file, so the bytes
   // already on disk still belong to it.
-  const resumePendingDownload = () => {
-    if (!pendingDownload) return;
-    downloadAndLoadModel({ ...pendingDownload.model, file: pendingDownload.file.path });
+  const resumePendingDownload = (pending) => {
+    setPendingDownloads(prev => prev.filter(p => p.finalUri !== pending.finalUri));
+    downloadAndLoadModel({ ...pending.model, file: pending.file.path });
   };
 
   const downloadAndLoadModel = async (model) => {
-    const title = `Downloading ${model.name}`;
+    const id = ++nextDownloadIdRef.current;
+    const entry = { model, file: null, finalUri: null, resumable: null, phase: 'querying', written: 0 };
+    downloadsRef.current.set(id, entry);
+    setDownloads(prev => [...prev, { id, finalUri: null, phase: 'querying', progress: 0, status: `Querying HuggingFace for ${model.name}...` }]);
     try {
-      setIsDownloading(true);
-      setIsPaused(false);
-      setDownloadProgress(0);
-      setDownloadStatus(`Querying HuggingFace for ${model.name}...`);
-
       // recursive=true: some repos keep each quantization in its own folder.
       const treeRes = await fetch(`https://huggingface.co/api/models/${model.id}/tree/main?recursive=true`);
       if (!treeRes.ok) throw new Error("Failed to fetch model tree from HuggingFace");
@@ -512,23 +585,29 @@ export default function App() {
       if (!pick.ok) throw new Error(pick.error);
       const file = pick.file;
       if (!pick.fits && !(await confirmLargeDownload(file))) {
-        setIsDownloading(false);
+        removeDownload(id);
         return;
       }
 
       const expectedSize = file.size;
       const downloadUrl = `https://huggingface.co/${model.id}/resolve/main/${file.path.split('/').map(encodeURIComponent).join('/')}`;
-      const finalUri = FileSystem.documentDirectory + file.path.split('/').pop();
+      const fileName = file.path.split('/').pop();
+      const finalUri = FileSystem.documentDirectory + fileName;
       const partUri = partUriFor(finalUri);
-      currentDownloadRef.current = { model, file, finalUri };
+      // Two downloads of the same file would write into the same .part file.
+      if (isDownloadActive(finalUri)) {
+        removeDownload(id);
+        alert(`${fileName} is already downloading.`);
+        return;
+      }
+      Object.assign(entry, { file, finalUri });
+      patchDownload(id, { finalUri });
 
       // @ts-ignore
       const fileInfo = await FileSystem.getInfoAsync(finalUri);
       if (fileInfo.exists) {
         if (fileInfo.size === expectedSize) {
-          setDownloadStatus(`Found locally. Loading from cache...`);
-          await finishDownload(finalUri);
-          setIsDownloading(false);
+          await finishDownload(id, finalUri);
           return;
         }
         // A wrong-sized file under the final name, left by an older version of the app.
@@ -548,11 +627,16 @@ export default function App() {
       });
 
       const startedAt = resumeData ? Number(resumeData) : 0;
-      setDownloadProgress((startedAt / expectedSize) * 100);
-      setDownloadStatus(resumeData ? `Resuming ${file.path} at ${formatGB(startedAt)}...` : `Downloading ${file.path}...`);
+      entry.phase = 'downloading';
+      entry.written = startedAt;
+      patchDownload(id, {
+        phase: 'downloading',
+        progress: (startedAt / expectedSize) * 100,
+        status: resumeData ? `Resuming ${file.path} at ${formatGB(startedAt)}...` : `Downloading ${file.path}...`,
+      });
       // Keeps the download going with the screen off (Android); shows its progress as a notification.
-      await startWork('download', { title, text: file.path.split('/').pop(), progress: (startedAt / expectedSize) * 100 });
-      const downloadResumable = FileSystem.createDownloadResumable(
+      syncDownloadWork();
+      entry.resumable = FileSystem.createDownloadResumable(
         downloadUrl,
         partUri,
         {
@@ -560,30 +644,17 @@ export default function App() {
         },
         (progress) => {
           // Against the known file size: the server's content length is only the part still to come.
-          const percent = (progress.totalBytesWritten / expectedSize) * 100;
-          setDownloadProgress(percent);
-          updateWork('download', { title, text: `${formatGB(progress.totalBytesWritten)} of ${formatGB(expectedSize)}`, progress: percent });
+          entry.written = progress.totalBytesWritten;
+          patchDownload(id, { progress: (progress.totalBytesWritten / expectedSize) * 100 });
+          syncDownloadWork();
         },
         resumeData
       );
-      downloadResumableRef.current = downloadResumable;
-
-      const result = await downloadResumable.downloadAsync();
-
-      if (result && result.uri) {
-        await finishDownload(result.uri);
-        setIsDownloading(false);
-      }
     } catch (err) {
-      const cancelled = !!err.message && err.message.toLowerCase().includes('cancel');
-      stopWork('download', isAway() && !cancelled ? { title: 'Download stopped', text: `${model.name}: open the app to resume it.` } : undefined);
-      console.log(`App Alert: Download failed: ${err.message}`);
-      if (!cancelled) {
-        const resumable = await loadPendingDownload().catch(() => null);
-        alert(`Download failed: ${err.message}${resumable ? '\n\nWhat was downloaded is kept, so you can resume it from the list.' : ''}`);
-      }
-      setIsDownloading(false);
+      failDownload(id, err);
+      return;
     }
+    await runDownload(id, () => entry.resumable.downloadAsync());
   };
 
   const handleKeyPress = (e) => {
@@ -652,7 +723,7 @@ export default function App() {
 
   // Callbacks registered once (below) read the current functions and values from here.
   useEffect(() => {
-    latestRef.current = { isBusy, modelUri, handleLoadModel, stopGeneration, cancelDownload, updateLastAssistant };
+    latestRef.current = { isBusy, modelUri, handleLoadModel, stopGeneration, cancelRunningDownloads, updateLastAssistant };
   });
 
   useEffect(() => {
@@ -685,7 +756,7 @@ export default function App() {
   // Buttons on the background notifications.
   useEffect(() => {
     const sub = addWorkActionListener((action) => {
-      if (action === 'cancel-download') latestRef.current.cancelDownload?.();
+      if (action === 'cancel-download') latestRef.current.cancelRunningDownloads?.();
     });
     return () => sub.remove();
   }, []);
@@ -981,50 +1052,52 @@ export default function App() {
                     )}
                   </TouchableOpacity>
 
-                  {isDownloading && (
-                    <View style={[styles.downloadContainer, { marginHorizontal: 0, marginTop: 0, marginBottom: 20 }]}>
-                      <Text style={styles.downloadStatus}>{downloadStatus}</Text>
+                  {downloads.map(d => (
+                    <View key={d.id} style={[styles.downloadContainer, { marginHorizontal: 0, marginTop: 0, marginBottom: 20 }]}>
+                      <Text style={styles.downloadStatus}>{d.status}</Text>
                       <View style={styles.progressBarBg}>
-                        <View style={[styles.progressBarFill, { width: `${downloadProgress}%` }]} />
+                        <View style={[styles.progressBarFill, { width: `${d.progress}%` }]} />
                       </View>
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
-                        <Text style={styles.downloadPercent}>{downloadProgress.toFixed(1)}%</Text>
-                        <View style={{ flexDirection: 'row', gap: 15 }}>
-                          <TouchableOpacity onPress={pauseResumeDownload}>
-                            <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>
-                              {isPaused ? '[RESUME]' : '[PAUSE]'}
-                            </Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity onPress={cancelDownload}>
-                            <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[CANCEL]</Text>
-                          </TouchableOpacity>
-                        </View>
+                        <Text style={styles.downloadPercent}>{d.progress.toFixed(1)}%</Text>
+                        {(d.phase === 'downloading' || d.phase === 'paused') && (
+                          <View style={{ flexDirection: 'row', gap: 15 }}>
+                            <TouchableOpacity onPress={() => pauseResumeDownload(d.id)}>
+                              <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>
+                                {d.phase === 'paused' ? '[RESUME]' : '[PAUSE]'}
+                              </Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity onPress={() => cancelDownload(d.id)}>
+                              <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[CANCEL]</Text>
+                            </TouchableOpacity>
+                          </View>
+                        )}
                       </View>
                     </View>
-                  )}
-                  {!isDownloading && pendingDownload && (
-                    <View style={[styles.downloadContainer, { marginHorizontal: 0, marginTop: 0, marginBottom: 20 }]}>
-                      <Text style={styles.downloadStatus}>Download interrupted: {pendingDownload.model.name}</Text>
+                  ))}
+                  {interruptedDownloads.map(p => (
+                    <View key={p.finalUri} style={[styles.downloadContainer, { marginHorizontal: 0, marginTop: 0, marginBottom: 20 }]}>
+                      <Text style={styles.downloadStatus}>Download interrupted: {p.model.name}</Text>
                       <View style={styles.progressBarBg}>
-                        <View style={[styles.progressBarFill, { width: `${Math.min(100, (pendingDownload.bytesOnDisk / pendingDownload.file.size) * 100)}%` }]} />
+                        <View style={[styles.progressBarFill, { width: `${Math.min(100, (p.bytesOnDisk / p.file.size) * 100)}%` }]} />
                       </View>
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
-                        <Text style={styles.downloadPercent}>{formatGB(pendingDownload.bytesOnDisk)} of {formatGB(pendingDownload.file.size)}</Text>
+                        <Text style={styles.downloadPercent}>{formatGB(p.bytesOnDisk)} of {formatGB(p.file.size)}</Text>
                         <View style={{ flexDirection: 'row', gap: 15 }}>
-                          <TouchableOpacity onPress={resumePendingDownload}>
+                          <TouchableOpacity onPress={() => resumePendingDownload(p)}>
                             {/* iOS can only resume within one session, so there it starts over. */}
                             <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>
                               {Platform.OS === 'android' ? '[RESUME]' : '[RESTART]'}
                             </Text>
                           </TouchableOpacity>
-                          <TouchableOpacity onPress={() => discardPendingDownload()}>
+                          <TouchableOpacity onPress={() => discardPendingDownload(p.finalUri)}>
                             <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[DEL]</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
                     </View>
-                  )}
-                  {localModels.length === 0 && !isDownloading && !pendingDownload ? (
+                  ))}
+                  {localModels.length === 0 && !isDownloading && interruptedDownloads.length === 0 ? (
                     <Text style={{ color: theme.colors.border, fontFamily: monoFont, textAlign: 'center', marginTop: 20 }}>No models downloaded yet.</Text>
                   ) : (
                     localModels.map((m, i) => (
