@@ -15,21 +15,27 @@ import {
   LayoutAnimation,
   UIManager,
   Easing,
+  Alert,
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { useLlama } from './src/hooks/useLlama';
+import * as Device from 'expo-device';
+import { useLlama, LOAD_SETTINGS } from './src/hooks/useLlama';
 import { useChatStore } from './src/hooks/useChatStore';
 import { useMcp } from './src/hooks/useMcp';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookbookMenu from './src/components/CookbookMenu';
 import McpPanel from './src/components/McpPanel';
 import ToolCallCard from './src/components/ToolCallCard';
+import ThinkingBlock from './src/components/ThinkingBlock';
 import { runAgentTurn, buildAgentSystemPrompt, trimHistory } from './src/mcp/agentLoop';
 import { chatLogToMessages } from './src/mcp/chatLog';
 import { setAgentMode } from './src/mcp/runtime';
+import { pickGgufFile } from './src/cookbook/ggufPicker';
+import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
+import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad } from './src/diagnostics/loadDiagnostics';
 import theme from './theme.json';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -42,6 +48,22 @@ const dampenedEase = Easing.bezier(0.25, 0.1, 0.25, 1);
 // Characters of earlier conversation sent with an agent turn (~1.5k tokens), leaving room in
 // the 4k context for tool schemas, tool results and the reply.
 const AGENT_HISTORY_CHARS = 6000;
+
+const GB = 1024 ** 3;
+
+// Ask before downloading a file that's bigger than the phone can likely hold.
+const confirmLargeDownload = (file) => new Promise(resolve => {
+  const ram = Device.totalMemory ? `${Math.round(Device.totalMemory / GB)} GB` : 'an unknown amount';
+  Alert.alert(
+    'Model may be too big',
+    `${file.path.split('/').pop()} is ${(file.size / GB).toFixed(1)} GB and this phone has ${ram} of RAM, so it will probably fail to load. Download anyway?`,
+    [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: 'Download', onPress: () => resolve(true) },
+    ],
+    { cancelable: true, onDismiss: () => resolve(false) }
+  );
+});
 
 const formatTime = (date) => {
   let h = date.getHours();
@@ -82,9 +104,13 @@ export default function App() {
   const [isAgentRunning, setIsAgentRunning] = useState(false);
   const [pendingApprovalIds, setPendingApprovalIds] = useState(() => new Set());
 
-  const { isReady, isInitializing, isGenerating, error, toolSupport, loadModel, generate, chat, stop, releaseModel } = useLlama();
+  const [isThinkingOn, setIsThinkingOn] = useState(false);
+
+  const { isReady, isInitializing, isGenerating, error, toolSupport, supportsThinking, loadModel, generate, chat, stop, releaseModel } = useLlama();
   const mcp = useMcp();
   const isBusy = isGenerating || isAgentRunning;
+  // The switch is remembered for every model; it only applies to models that can think.
+  const thinking = supportsThinking && isThinkingOn;
 
   // Agent turn bookkeeping: tool-call id -> resolver of its approval prompt, tool names the
   // user allowed for the whole chat, the stop flag, and a token for the running turn.
@@ -95,6 +121,8 @@ export default function App() {
 
   const inputRef = useRef(null);
   const downloadResumableRef = useRef(null);
+  // The model and file being downloaded, for when the download finishes (directly or after a resume).
+  const currentDownloadRef = useRef(null);
   const scrollViewRef = useRef(null);
 
   const menuAnim = useRef(new Animated.Value(0)).current;
@@ -179,16 +207,52 @@ export default function App() {
       console.log(`App Alert: Failed to save last model: ${e.message}`);
       alert(`Failed to save last model: ${e.message}`);
     }
-    await loadModel(uri);
+    const failure = await loadModel(uri);
+    if (failure) {
+      // Don't retry a failing model on every launch.
+      AsyncStorage.removeItem('last_model_uri').catch(() => {});
+      offerLoadFailureReport(await collectLoadFailure({
+        kind: 'error',
+        uri,
+        error: failure.message,
+        log: failure.log,
+        settings: LOAD_SETTINGS,
+      }));
+    }
   };
 
-  // Load last model on startup
   useEffect(() => {
-    AsyncStorage.getItem('last_model_uri').then(uri => {
+    AsyncStorage.getItem('thinking_mode').then(value => setIsThinkingOn(value === 'on')).catch(() => {});
+  }, []);
+
+  const toggleThinking = () => {
+    const next = !isThinkingOn;
+    setIsThinkingOn(next);
+    AsyncStorage.setItem('thinking_mode', next ? 'on' : 'off').catch(e => {
+      console.log(`App Alert: Failed to save thinking mode: ${e.message}`);
+    });
+  };
+
+  // Load last model on startup, unless loading it last time never finished: then it probably
+  // crashed the app, and loading it again would crash it again.
+  useEffect(() => {
+    (async () => {
+      const interrupted = await takeInterruptedLoad();
+      if (interrupted) {
+        await AsyncStorage.removeItem('last_model_uri').catch(() => {});
+        offerLoadFailureReport(await collectLoadFailure({
+          kind: 'crash',
+          uri: interrupted.uri,
+          log: interrupted.log,
+          settings: LOAD_SETTINGS,
+        }));
+        return;
+      }
+      const uri = await AsyncStorage.getItem('last_model_uri');
       if (uri) {
         handleLoadModel(uri);
       }
-    });
+    })().catch(e => console.log(`App Alert: Startup model load failed: ${e.message}`));
   }, []);
 
   const pauseResumeDownload = async () => {
@@ -199,8 +263,7 @@ export default function App() {
         setDownloadStatus(`Resuming download...`);
         const result = await downloadResumableRef.current.resumeAsync();
         if (result && result.uri) {
-          setDownloadStatus(`Download complete! Loading into RAM...`);
-          await handleLoadModel(result.uri);
+          await finishDownload(result.uri);
           setIsDownloading(false);
         }
       } else {
@@ -318,22 +381,46 @@ export default function App() {
     }
   };
 
+  // Shared by a straight download and one resumed after a pause. The size must match
+  // exactly: even a slightly short GGUF fails to load.
+  const finishDownload = async (uri) => {
+    const { model, file } = currentDownloadRef.current ?? {};
+    const info = await FileSystem.getInfoAsync(uri);
+    if (file?.size && (!info.exists || info.size !== file.size)) {
+      const got = info.exists ? (info.size / GB).toFixed(2) : '0';
+      throw new Error(`The download is incomplete (${got} of ${(file.size / GB).toFixed(2)} GB). Please download it again.`);
+    }
+    if (model && file) {
+      await recordModelSource(uri, { origin: model.recommended ? 'recommended' : 'cookbook', repo: model.id, path: file.path, expectedSize: file.size });
+    }
+    setDownloadStatus(`Download complete! Loading into RAM...`);
+    await handleLoadModel(uri);
+  };
+
   const downloadAndLoadModel = async (model) => {
     try {
       setIsDownloading(true);
       setDownloadProgress(0);
       setDownloadStatus(`Querying HuggingFace for ${model.name}...`);
 
-      const treeRes = await fetch(`https://huggingface.co/api/models/${model.id}/tree/main`);
+      // recursive=true: some repos keep each quantization in its own folder.
+      const treeRes = await fetch(`https://huggingface.co/api/models/${model.id}/tree/main?recursive=true`);
       if (!treeRes.ok) throw new Error("Failed to fetch model tree from HuggingFace");
       const tree = await treeRes.json();
 
-      let file = tree.find(f => f.path.toLowerCase().includes('q4_k_m.gguf'));
-      if (!file) file = tree.find(f => f.path.toLowerCase().endsWith('.gguf'));
-      if (!file) throw new Error("No .gguf file found in this repo.");
+      // Leave room for the system, like the Cookbook's RAM estimate does.
+      const maxBytes = Device.totalMemory ? Device.totalMemory - SYSTEM_RAM_GB * GB : undefined;
+      const pick = pickGgufFile(tree, model.file, maxBytes);
+      if (!pick.ok) throw new Error(pick.error);
+      const file = pick.file;
+      if (!pick.fits && !(await confirmLargeDownload(file))) {
+        setIsDownloading(false);
+        return;
+      }
+      currentDownloadRef.current = { model, file };
 
       const expectedSize = file.size;
-      const downloadUrl = `https://huggingface.co/${model.id}/resolve/main/${file.path}`;
+      const downloadUrl = `https://huggingface.co/${model.id}/resolve/main/${file.path.split('/').map(encodeURIComponent).join('/')}`;
       const localUri = FileSystem.documentDirectory + file.path.split('/').pop();
 
       // @ts-ignore
@@ -341,7 +428,7 @@ export default function App() {
       if (fileInfo.exists) {
         if (fileInfo.size === expectedSize) {
           setDownloadStatus(`Found locally. Loading from cache...`);
-          await handleLoadModel(localUri);
+          await finishDownload(localUri);
           setIsDownloading(false);
           return;
         } else {
@@ -369,14 +456,7 @@ export default function App() {
       const result = await downloadResumable.downloadAsync();
 
       if (result && result.uri) {
-        // Double check size just to be bulletproof
-        const finalInfo = await FileSystem.getInfoAsync(result.uri);
-        if (finalInfo.exists && finalInfo.size >= expectedSize * 0.99) {
-          setDownloadStatus(`Download complete! Loading into RAM...`);
-          await handleLoadModel(result.uri);
-        } else {
-          throw new Error("Download completed but file size mismatch. It may have been corrupted.");
-        }
+        await finishDownload(result.uri);
         setIsDownloading(false);
       }
     } catch (err) {
@@ -455,15 +535,16 @@ export default function App() {
     setChatLog(prev => prev.map(entry => (entry.role === 'tool' && entry.id === id ? { ...entry, ...patch } : entry)));
 
   // Agent mode: the agent loop drives llama.rn with the MCP tools and reports each step,
-  // which becomes assistant bubbles and tool cards in the chat log.
-  const runAgent = async (userMsg, currentLog) => {
+  // which becomes assistant bubbles and tool cards in the chat log. With offerTools false it
+  // is a single templated chat turn (used for thinking, which needs the model's template).
+  const runAgent = async (userMsg, currentLog, { offerTools = true } = {}) => {
     const run = {};
     activeAgentRunRef.current = run;
     const isLive = () => activeAgentRunRef.current === run;
     stopRequestedRef.current = false;
     setIsAgentRunning(true);
 
-    const system = buildAgentSystemPrompt(systemPrompt, mcp.manager, mcp.disabled);
+    const system = offerTools ? buildAgentSystemPrompt(systemPrompt, mcp.manager, mcp.disabled) : systemPrompt;
     const messages = trimHistory(chatLogToMessages([...currentLog, { role: 'user', text: userMsg }], system), AGENT_HISTORY_CHARS);
 
     const onEvent = (event) => {
@@ -477,8 +558,16 @@ export default function App() {
           updateLastAssistant({ text: event.text });
           scrollViewRef.current?.scrollToEnd({ animated: false });
           break;
+        case 'reasoning':
+          updateLastAssistant({ reasoning: event.text });
+          scrollViewRef.current?.scrollToEnd({ animated: false });
+          break;
         case 'assistant':
-          updateLastAssistant(event.toolCalls.length ? { text: event.content, toolCalls: event.toolCalls } : { text: event.content });
+          updateLastAssistant({
+            text: event.content,
+            ...(event.reasoning ? { reasoning: event.reasoning } : {}),
+            ...(event.toolCalls.length ? { toolCalls: event.toolCalls } : {}),
+          });
           break;
         case 'tool_call':
           setChatLog(prev => [...prev, {
@@ -504,10 +593,11 @@ export default function App() {
 
     try {
       await runAgentTurn({
-        complete: chat,
+        complete: (request) => chat(request, { thinking }),
         manager: mcp.manager,
         messages,
         disabled: mcp.disabled,
+        offerTools,
         requestApproval: (call) => new Promise(resolve => {
           if (stopRequestedRef.current || !isLive()) return resolve(false);
           approvalResolversRef.current.set(call.id, resolve);
@@ -552,6 +642,11 @@ export default function App() {
 
     if (mcp.settings.agentMode && toolSupport !== 'none') {
       await runAgent(userMsg, currentLog);
+      return;
+    }
+    // Thinking goes through the model's chat template, so the turn takes the agent path without tools.
+    if (thinking) {
+      await runAgent(userMsg, currentLog, { offerTools: false });
       return;
     }
 
@@ -769,7 +864,9 @@ export default function App() {
                 );
               }
               // A round that only called tools has no text; its tool cards stand in for it.
-              if (msg.role === 'assistant' && !msg.text && msg.toolCalls?.length) return null;
+              if (msg.role === 'assistant' && !msg.text && !msg.reasoning && msg.toolCalls?.length) return null;
+              const isStreaming = isBusy && index === chatLog.length - 1;
+              const body = msg.text || (isStreaming && !msg.reasoning ? "..." : "");
               return (
                 <View key={index} style={[styles.messageWrapper, msg.role === 'user' ? styles.userWrapper : styles.assistantWrapper]}>
                   <View style={styles.messageHeader}>
@@ -778,9 +875,12 @@ export default function App() {
                       {msg.time && <Text style={{ color: theme.colors.border, fontWeight: 'normal' }}>  {msg.time}</Text>}
                     </Text>
                   </View>
-                  <Text style={styles.messageText} selectable={true}>
-                    {msg.text || (isBusy && index === chatLog.length - 1 ? "..." : "")}
-                  </Text>
+                  {!!msg.reasoning && <ThinkingBlock text={msg.reasoning} live={isStreaming && !msg.text} />}
+                  {(!!body || !msg.reasoning) && (
+                    <Text style={styles.messageText} selectable={true}>
+                      {body}
+                    </Text>
+                  )}
                 </View>
               );
             })}
@@ -904,30 +1004,40 @@ export default function App() {
             )}
             <View style={styles.inputWrapper}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2, marginLeft: 42, marginRight: 4 }}>
-                <View style={[styles.modelPill, { borderWidth: 0, paddingHorizontal: 0, paddingVertical: 0, backgroundColor: 'transparent', height: 16 }]}>
-                  <Text style={[styles.modelPillText, { fontSize: 10, color: theme.colors.border }]} numberOfLines={1}>
+                <View style={[styles.modelPill, { flexShrink: 1, borderWidth: 0, paddingHorizontal: 0, paddingVertical: 0, backgroundColor: 'transparent', height: 16 }]}>
+                  <Text style={[styles.modelPillText, { flexShrink: 1, fontSize: 10, color: theme.colors.border }]} numberOfLines={1}>
                     {modelUri ? decodeURIComponent(modelUri.split('/').pop()) : 'No Model Loaded'}
                   </Text>
                   <Text style={[styles.modelPillIcon, { fontSize: 8 }]}>v</Text>
                 </View>
-                {/* Tap toggles agent mode, long-press opens the tool settings */}
-                <TouchableOpacity
-                  onPress={() => setAgentMode(!mcp.settings.agentMode)}
-                  onLongPress={() => setIsMcpVisible(true)}
-                  disabled={isBusy}
-                  hitSlop={8}
-                >
-                  <Text
-                    style={[styles.modelPillText, { fontSize: 10, marginRight: 0, color: mcp.settings.agentMode && toolSupport !== 'none' ? '#6bc46d' : theme.colors.border }]}
-                    numberOfLines={1}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginLeft: 8 }}>
+                  {/* Shown only for models that can think */}
+                  {supportsThinking && (
+                    <TouchableOpacity onPress={toggleThinking} disabled={isBusy} hitSlop={8}>
+                      <Text style={[styles.modelPillText, { fontSize: 10, marginRight: 0, color: isThinkingOn ? '#6bc46d' : theme.colors.border }]}>
+                        {isThinkingOn ? 'think: on' : 'think: off'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                  {/* Tap toggles agent mode, long-press opens the tool settings */}
+                  <TouchableOpacity
+                    onPress={() => setAgentMode(!mcp.settings.agentMode)}
+                    onLongPress={() => setIsMcpVisible(true)}
+                    disabled={isBusy}
+                    hitSlop={8}
                   >
-                    {!mcp.settings.agentMode
-                      ? 'agent: off'
-                      : isReady && toolSupport === 'none'
-                        ? 'agent: no tool support'
-                        : `agent · ${mcp.enabledToolCount} tools`}
-                  </Text>
-                </TouchableOpacity>
+                    <Text
+                      style={[styles.modelPillText, { fontSize: 10, marginRight: 0, color: mcp.settings.agentMode && toolSupport !== 'none' ? '#6bc46d' : theme.colors.border }]}
+                      numberOfLines={1}
+                    >
+                      {!mcp.settings.agentMode
+                        ? 'agent: off'
+                        : isReady && toolSupport === 'none'
+                          ? 'agent: no tool support'
+                          : `agent · ${mcp.enabledToolCount} tools`}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
                 <TouchableOpacity

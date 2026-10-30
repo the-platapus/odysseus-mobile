@@ -1,0 +1,42 @@
+# Opened by the app when a model fails to load (src/diagnostics/). The app fills each field
+# through URL parameters named after the field ids below, so keep the ids in sync with
+# issueUrl() in src/diagnostics/report.ts.
+name: Model failed to load
+description: A model didn't load in the app. The app fills this in for you.
+title: "Model failed to load: "
+labels: ["model-load-failure"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. The app filled in the details below. Add anything you noticed in the last box, then submit.
+  - type: textarea
+    id: model
+    attributes:
+      label: Model
+      description: Which file failed, where it came from, and what its GGUF header says.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error
+    validations:
+      required: true
+  - type: textarea
+    id: device
+    attributes:
+      label: Device and app
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: llama.cpp log
+      description: What llama.cpp printed while loading the model.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Optional. For example, whether this model loaded before, or what you were doing when it failed.

@@ -28,10 +28,13 @@ export type CompletionRequest = {
   tools?: OpenAITool[];
   /** Receives the parsed assistant content accumulated so far in this round. */
   onContent: (text: string) => void;
+  /** Receives the model's thinking accumulated so far, for models that think. */
+  onReasoning?: (text: string) => void;
 };
 
 export type CompletionResponse = {
   content: string;
+  reasoning?: string;
   toolCalls: { id?: string | null; function: { name: string; arguments: string } }[];
   interrupted: boolean;
 };
@@ -49,7 +52,8 @@ export type PendingCall = {
 export type AgentEvent =
   | { type: 'round_start'; round: number }
   | { type: 'content'; text: string }
-  | { type: 'assistant'; content: string; toolCalls: ToolCall[] }
+  | { type: 'reasoning'; text: string }
+  | { type: 'assistant'; content: string; reasoning: string; toolCalls: ToolCall[] }
   | { type: 'tool_call'; call: PendingCall; needsApproval: boolean }
   | { type: 'tool_running'; id: string }
   | { type: 'tool_result'; id: string; result: ToolResult; denied?: boolean }
@@ -63,6 +67,8 @@ export type RunAgentOptions = {
   messages: ChatMessage[];
   disabled?: DisabledMap;
   maxRounds?: number;
+  /** false = a plain templated chat turn: one round, no tools offered. Default true. */
+  offerTools?: boolean;
   /** Ask the user. Resolve true to run the call. Without it, calls needing approval are denied. */
   requestApproval?: (call: PendingCall) => Promise<boolean>;
   /** Calls that skip approval even though they write (e.g. "allow for this chat"). */
@@ -94,7 +100,8 @@ const callSignature = (name: string, args: Record<string, unknown>) => `${name}:
 
 export async function runAgentTurn(options: RunAgentOptions): Promise<{ messages: ChatMessage[]; reason: DoneReason }> {
   const { complete, manager, disabled = {}, onEvent, requestApproval, isPreApproved } = options;
-  const maxRounds = options.maxRounds ?? DEFAULT_MAX_ROUNDS;
+  const offerTools = options.offerTools ?? true;
+  const maxRounds = offerTools ? options.maxRounds ?? DEFAULT_MAX_ROUNDS : 0;
   const isStopped = options.isStopped ?? (() => false);
   const history: ChatMessage[] = [...options.messages];
   const added: ChatMessage[] = [];
@@ -165,8 +172,10 @@ export async function runAgentTurn(options: RunAgentOptions): Promise<{ messages
       messages: [...history],
       tools: tools.length ? tools : undefined,
       onContent: (text) => onEvent({ type: 'content', text }),
+      onReasoning: (text) => onEvent({ type: 'reasoning', text }),
     });
     const content = (response.content ?? '').trim();
+    const reasoning = (response.reasoning ?? '').trim();
     const toolCalls: ToolCall[] = finalRound
       ? []
       : response.toolCalls.map((tc) => ({
@@ -175,11 +184,13 @@ export async function runAgentTurn(options: RunAgentOptions): Promise<{ messages
           function: { name: tc.function.name, arguments: tc.function.arguments ?? '' },
         }));
 
+    // Reasoning is shown to the user but not sent back: in a 4k context, a few rounds of
+    // re-sent thinking would crowd out the tool results the model actually needs.
     push(toolCalls.length ? { role: 'assistant', content, tool_calls: toolCalls } : { role: 'assistant', content });
-    onEvent({ type: 'assistant', content, toolCalls });
+    onEvent({ type: 'assistant', content, reasoning, toolCalls });
 
     if (response.interrupted || isStopped()) return finish('stopped');
-    if (toolCalls.length === 0) return finish(finalRound && round > maxRounds ? 'max_rounds' : 'final');
+    if (toolCalls.length === 0) return finish(offerTools && round > maxRounds ? 'max_rounds' : 'final');
 
     let repeatsOnly = true;
     for (const tc of toolCalls) {

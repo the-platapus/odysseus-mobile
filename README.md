@@ -13,12 +13,14 @@ This is that experiment: a local LLM chat app that fits in your pocket, built wi
 ## Features
 
 - **Fully on-device inference.** Models run through llama.cpp on the phone itself, and replies stream in token by token. No server, no account, no API key.
-- **Hardware-aware Cookbook.** Browse the 100 trending GGUF text-generation models on Hugging Face. The app reads your phone's RAM, estimates what each model needs, and greys out the ones that won't fit. Models that fit come first, smallest first. The list is cached, so you can still browse it offline.
-- **Resumable downloads.** Picks the `Q4_K_M` quantisation when a repo has one (otherwise the first `.gguf` it finds), shows progress, and can pause, resume or cancel. The file size is checked when it finishes, then the model loads automatically.
+- **Hardware-aware Cookbook.** Browse the 100 trending GGUF text-generation models on Hugging Face, or search all of them. **Recommended** at the top lists the models in [Tested models](#tested-models). Filter pills narrow the list by what fits your phone, size, thinking, tool use, MoE and model family. The app reads your phone's RAM, estimates what each model needs, and greys out the ones that won't fit. Models that fit come first, smallest first. The lists are cached, so you can still browse them offline.
+- **Resumable downloads.** Picks the best 4-bit file that fits your phone (`Q4_K_M` first), looking in subfolders too. It skips files that can't load on their own: vision projectors (`mmproj`), parts of split models, adapters and draft models. It asks first if the file looks too big for your RAM. Downloads show progress and can be paused, resumed or cancelled. The file size must match exactly, then the model loads automatically.
+- **Load failure reports.** If a model fails to load, or crashes the app while loading, the app says what probably went wrong and offers to report it. **Report on GitHub** opens a pre-filled issue with the model, your phone, and llama.cpp's log, for you to check before submitting. **Share** sends the same report anywhere else. A model that crashed the app isn't loaded again automatically.
 - **Bring your own model.** Import any `.gguf` file from your phone's storage.
 - **Model library.** See your downloaded models, switch between them and delete the ones you're done with. The last model you used reloads when you open the app.
 - **Chat history.** Keep multiple conversations, saved on the device.
 - **Custom system prompt.** Change how the assistant behaves.
+- **Thinking mode.** For models that can reason before answering (Qwen3, DeepSeek-R1 distills, gpt-oss, Gemma 4 and others), switch thinking on or off. The model's thinking streams into a collapsible block above its reply.
 - **Agent mode with MCP tools.** The model can call tools through the [Model Context Protocol](https://modelcontextprotocol.io), using llama.cpp's native tool calling with each model's own chat template. Built in: file tools (in a private workspace, or a phone folder you pick) and a memory the model can save facts to. You can also connect remote MCP servers over Streamable HTTP. Tools that change something ask you first.
 
 ## Requirements
@@ -34,6 +36,24 @@ This is that experiment: a local LLM chat app that fits in your pocket, built wi
   | 7B | 7 GB |
   | 8B | 8 GB |
 
+## Tested models
+
+Models confirmed to work in the app on real phones. The Cookbook shows this table under **Recommended**, reading it straight from this README on the `master` branch, so adding a row here adds it to the app without a new release.
+
+<!--
+How the app reads this table (src/cookbook/catalog.ts, parseRecommended):
+- Columns are matched by their header names, so keep the headers. Only Repo is required.
+- Repo: the Hugging Face repo id, e.g. `unsloth/Qwen3-1.7B-GGUF` (a huggingface.co link works too).
+- File: the exact .gguf that was tested. Leave it empty to let the app pick one.
+- Features: any of thinking, tools, moe. They show as tags and work with the filter pills.
+- Tested on: phone and RAM, e.g. Pixel 7 (8 GB).
+Example row:
+| Qwen3 1.7B | `unsloth/Qwen3-1.7B-GGUF` | `Qwen3-1.7B-Q4_K_M.gguf` | thinking, tools | Pixel 7 (8 GB) |
+-->
+
+| Model | Repo | File | Features | Tested on |
+|---|---|---|---|---|
+
 ## Install
 
 Download the latest build from the [Releases page](https://github.com/the-platapus/odysseus-mobile/releases).
@@ -44,7 +64,7 @@ Download the latest build from the [Releases page](https://github.com/the-platap
 ## Using it
 
 1. Tap **Cookbook** in the top-right corner.
-2. On the **[DOWNLOADS]** tab, pick a model. Greyed-out models need more RAM than your phone has.
+2. On the **[DOWNLOADS]** tab, pick a model from **Recommended**, the trending list, or a search. Tap the pills to filter. Greyed-out models need more RAM than your phone has.
 3. Wait for the download to finish. The model loads into memory automatically.
 4. Start chatting.
 
@@ -54,6 +74,7 @@ Where everything else lives:
 - **☰** (top left) opens your chat history and **+ New Conversation**.
 - **+** (next to the message box) opens the menu with **System Prompt** and **Tools (MCP)**.
 - **agent: off** (above the message box, right) switches agent mode on and off. Long-press it to open **Tools (MCP)**.
+- **think: off** (next to it) switches thinking on and off. It only appears when the loaded model can think. The setting is remembered across models.
 
 ## Agent mode and MCP tools
 
@@ -72,9 +93,10 @@ The tool layer follows the MCP design of the Odysseus desktop app. Each MCP serv
 
 ## Good to know
 
-- The context window is 4,096 tokens. In normal chat, each reply is capped at 256 tokens and ends at the first blank line, so long answers get cut short. Agent mode replies can run to 1,024 tokens.
-- Normal chat prompts use a plain `User:` / `Assistant:` format instead of each model's own chat template, so some models answer better than others. Agent mode uses the model's own chat template.
-- RAM estimates come from the parameter count in the model's name (like `3B`). Models without one show "Unknown".
+- The context window is 4,096 tokens. In normal chat, each reply is capped at 256 tokens and ends at the first blank line, so long answers get cut short.
+- Normal chat prompts use a plain `User:` / `Assistant:` format instead of each model's own chat template, so some models answer better than others. Agent mode and thinking mode use the model's own chat template, and replies can run to 1,024 tokens.
+- Thinking is capped at 1,024 tokens. After that the model is told to stop thinking and answer. The thinking is shown but not sent back to the model in later turns, to save context.
+- RAM estimates come from the parameter count Hugging Face reports for the GGUF, or from the model's name (like `3B`) when it doesn't. Models with neither show "RAM ?".
 - The internet is only used to fetch the Cookbook list, download models, and talk to any remote MCP servers you add.
 
 ## Building from source
@@ -128,7 +150,11 @@ It waits for the build to finish, converts the newest `.aab` into a universal AP
 | Path | What it is |
 |---|---|
 | `App.js` | Main screen: chat, downloads, model library, history and system prompt |
-| `src/components/CookbookMenu.js` | Hardware-aware model catalog from Hugging Face |
+| `src/components/CookbookMenu.js` | Hardware-aware model catalog from Hugging Face: Recommended, search, filter pills |
+| `src/cookbook/` | Cookbook data: which GGUF file to download, model facts and filters, the Tested models parser |
+| `src/diagnostics/` | Model load failure reports: llama.cpp log capture, crash detection, the GitHub issue |
+| `src/repo.ts` | This repo's name, used for the README and for issues |
+| `.github/ISSUE_TEMPLATE/model-load-failure.yml` | The issue form that load failure reports open |
 | `src/hooks/useLlama.ts` | Loads models and generates replies with llama.rn, including tool-calling rounds |
 | `src/hooks/useChatStore.js` | Saves conversations on the device |
 | `src/hooks/useMcp.ts` | MCP settings and live server state for the UI |
@@ -137,6 +163,7 @@ It waits for the build to finish, converts the newest `.aab` into a universal AP
 | `src/mcp/expoAdapters.ts`, `src/mcp/runtime.ts` | Device storage and file access for MCP, plus the app-wide manager and its settings |
 | `src/components/McpPanel.js` | The Tools (MCP) screen: servers, adding a server, the files folder |
 | `src/components/ToolCallCard.js` | Tool calls and approval prompts in the chat |
+| `src/components/ThinkingBlock.js` | The model's thinking above its reply |
 | `theme.json` | Colours |
 | `app.config.js` | Limits Android builds to `arm64-v8a` and `x86_64` |
 | `.github/workflows/mobile-build.yml` | CI builds and GitHub Releases |
