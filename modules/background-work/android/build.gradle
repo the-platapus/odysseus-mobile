@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.backgroundwork'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.backgroundwork"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}
+
+dependencies {
+  // 1.17 has NotificationCompat.ProgressStyle and promoted ongoing notifications (Android 16 Live Updates).
+  implementation 'androidx.core:core:1.17.0'
+}

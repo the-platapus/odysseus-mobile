@@ -16,6 +16,7 @@ import {
   UIManager,
   Easing,
   Alert,
+  AppState,
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -36,6 +37,9 @@ import { setAgentMode } from './src/mcp/runtime';
 import { pickGgufFile } from './src/cookbook/ggufPicker';
 import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
 import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad } from './src/diagnostics/loadDiagnostics';
+import { clearPendingDownload, loadPendingDownload, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
+import { displayToolName } from './src/mcp/manager';
+import { addWorkActionListener, dismissFinishedWork, startWork, stopWork, updateWork } from './modules/background-work';
 import theme from './theme.json';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -50,6 +54,22 @@ const dampenedEase = Easing.bezier(0.25, 0.1, 0.25, 1);
 const AGENT_HISTORY_CHARS = 6000;
 
 const GB = 1024 ** 3;
+const formatGB = (bytes) => `${(bytes / GB).toFixed(2)} GB`;
+
+// The user isn't looking at the app, so finished work gets its own notification.
+const isAway = () => AppState.currentState !== 'active';
+
+const tail = (text, max) => (text.length > max ? `…${text.slice(-max)}` : text);
+
+// A reply's notification while it's being written (Android; see modules/background-work).
+// It shows the end of the reply so far, since that's the part that changes.
+const startReplyWork = (question) => {
+  startWork('generation', { title: 'Odysseus is replying', text: tail(question, 120) });
+  return {
+    update: (text, title = 'Odysseus is replying') => updateWork('generation', { title, text: tail(text, 500) || '…' }),
+    finish: (text) => stopWork('generation', isAway() && text.trim() ? { title: 'Odysseus replied', text: tail(text.trim(), 1000) } : undefined),
+  };
+};
 
 // Ask before downloading a file that's bigger than the phone can likely hold.
 const confirmLargeDownload = (file) => new Promise(resolve => {
@@ -94,6 +114,8 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadStatus, setDownloadStatus] = useState('');
   const [isPaused, setIsPaused] = useState(false);
+  // A download that was cut off, resumable from the Models tab.
+  const [pendingDownload, setPendingDownload] = useState(null);
   const [isCookbookVisible, setIsCookbookVisible] = useState(false);
   const [modalTab, setModalTab] = useState('cookbook');
   const [localModels, setLocalModels] = useState([]);
@@ -123,6 +145,12 @@ export default function App() {
   const downloadResumableRef = useRef(null);
   // The model and file being downloaded, for when the download finishes (directly or after a resume).
   const currentDownloadRef = useRef(null);
+  // Latest values for callbacks that outlive a render (AppState changes, notification buttons).
+  const latestRef = useRef({});
+  // iOS: a reply was cut off because the app left the screen; the model is reloaded on return.
+  const reloadAfterBackgroundRef = useRef(false);
+  // The reply being written (a promise), so the iOS reload can wait for it to finish.
+  const activeSendRef = useRef(null);
   const scrollViewRef = useRef(null);
 
   const menuAnim = useRef(new Animated.Value(0)).current;
@@ -219,6 +247,7 @@ export default function App() {
         settings: LOAD_SETTINGS,
       }));
     }
+    return !failure;
   };
 
   useEffect(() => {
@@ -261,6 +290,8 @@ export default function App() {
       if (isPaused) {
         setIsPaused(false);
         setDownloadStatus(`Resuming download...`);
+        const name = currentDownloadRef.current?.model?.name ?? 'model';
+        await startWork('download', { title: `Downloading ${name}`, text: 'Resuming…', progress: downloadProgress });
         const result = await downloadResumableRef.current.resumeAsync();
         if (result && result.uri) {
           await finishDownload(result.uri);
@@ -268,12 +299,17 @@ export default function App() {
         }
       } else {
         await downloadResumableRef.current.pauseAsync();
+        // Nothing runs while paused, so don't keep the phone awake for it.
+        stopWork('download');
         setIsPaused(true);
         setDownloadStatus('Download paused.');
       }
     } catch (e) {
+      stopWork('download');
       console.log(`App Alert: Failed to toggle pause: ${e.message}`);
-      alert(`Failed to toggle pause: ${e.message}`);
+      alert(`Download stopped: ${e.message}\n\nWhat was downloaded is kept, so you can resume it from the list.`);
+      setIsDownloading(false);
+      setIsPaused(false);
     }
   };
 
@@ -281,6 +317,8 @@ export default function App() {
     if (downloadResumableRef.current) {
       try {
         await downloadResumableRef.current.cancelAsync();
+        stopWork('download');
+        await discardPendingDownload(currentDownloadRef.current?.finalUri);
         setIsDownloading(false);
         setIsPaused(false);
         setDownloadStatus('Download cancelled.');
@@ -347,6 +385,7 @@ export default function App() {
         };
       }));
       setLocalModels(fileDetails);
+      setPendingDownload(await loadPendingDownload());
     } catch (e) {
       console.log(`App Alert: Failed to scan local models: ${e.message}`);
       alert(`Failed to scan local models: ${e.message}`);
@@ -382,24 +421,60 @@ export default function App() {
   };
 
   // Shared by a straight download and one resumed after a pause. The size must match
-  // exactly: even a slightly short GGUF fails to load.
+  // exactly: even a slightly short GGUF fails to load. Only then does the .part file get the
+  // model's real name, so the Models list never shows a half-downloaded file.
   const finishDownload = async (uri) => {
-    const { model, file } = currentDownloadRef.current ?? {};
+    const { model, file, finalUri } = currentDownloadRef.current ?? {};
     const info = await FileSystem.getInfoAsync(uri);
     if (file?.size && (!info.exists || info.size !== file.size)) {
-      const got = info.exists ? (info.size / GB).toFixed(2) : '0';
-      throw new Error(`The download is incomplete (${got} of ${(file.size / GB).toFixed(2)} GB). Please download it again.`);
+      const got = info.exists ? formatGB(info.size) : '0 GB';
+      // Bigger than expected means the server ignored the resume and sent the whole file
+      // again after the part already on disk: that file can't be repaired.
+      if (info.exists && info.size > file.size) await FileSystem.deleteAsync(uri, { idempotent: true });
+      throw new Error(`The download is incomplete (${got} of ${formatGB(file.size)}).`);
     }
+    let modelPath = uri;
+    if (finalUri && uri !== finalUri) {
+      await FileSystem.moveAsync({ from: uri, to: finalUri });
+      modelPath = finalUri;
+    }
+    await clearPendingDownload();
+    setPendingDownload(null);
     if (model && file) {
-      await recordModelSource(uri, { origin: model.recommended ? 'recommended' : 'cookbook', repo: model.id, path: file.path, expectedSize: file.size });
+      await recordModelSource(modelPath, { origin: model.recommended ? 'recommended' : 'cookbook', repo: model.id, path: file.path, expectedSize: file.size });
     }
     setDownloadStatus(`Download complete! Loading into RAM...`);
-    await handleLoadModel(uri);
+    // The download's notification stays up while the model loads, so loading also isn't cut off.
+    updateWork('download', { title: `Loading ${model?.name ?? 'model'}`, text: 'Loading into memory…' });
+    const loaded = await handleLoadModel(modelPath);
+    stopWork('download', isAway()
+      ? loaded
+        ? { title: 'Model ready', text: `${model?.name ?? 'The model'} is downloaded and loaded.` }
+        : { title: 'Model downloaded', text: `${model?.name ?? 'The model'} downloaded but didn't load. Open the app for details.` }
+      : undefined);
+  };
+
+  // Delete what was downloaded so far and forget the interrupted download.
+  const discardPendingDownload = async (finalUri) => {
+    const pending = await loadPendingDownload();
+    const partUri = pending?.partUri ?? (finalUri ? partUriFor(finalUri) : null);
+    if (partUri) await FileSystem.deleteAsync(partUri, { idempotent: true });
+    await clearPendingDownload();
+    setPendingDownload(null);
+  };
+
+  // Continue an interrupted download: the same repo and exactly the same file, so the bytes
+  // already on disk still belong to it.
+  const resumePendingDownload = () => {
+    if (!pendingDownload) return;
+    downloadAndLoadModel({ ...pendingDownload.model, file: pendingDownload.file.path });
   };
 
   const downloadAndLoadModel = async (model) => {
+    const title = `Downloading ${model.name}`;
     try {
       setIsDownloading(true);
+      setIsPaused(false);
       setDownloadProgress(0);
       setDownloadStatus(`Querying HuggingFace for ${model.name}...`);
 
@@ -417,39 +492,56 @@ export default function App() {
         setIsDownloading(false);
         return;
       }
-      currentDownloadRef.current = { model, file };
 
       const expectedSize = file.size;
       const downloadUrl = `https://huggingface.co/${model.id}/resolve/main/${file.path.split('/').map(encodeURIComponent).join('/')}`;
-      const localUri = FileSystem.documentDirectory + file.path.split('/').pop();
+      const finalUri = FileSystem.documentDirectory + file.path.split('/').pop();
+      const partUri = partUriFor(finalUri);
+      currentDownloadRef.current = { model, file, finalUri };
 
       // @ts-ignore
-      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      const fileInfo = await FileSystem.getInfoAsync(finalUri);
       if (fileInfo.exists) {
         if (fileInfo.size === expectedSize) {
           setDownloadStatus(`Found locally. Loading from cache...`);
-          await finishDownload(localUri);
+          await finishDownload(finalUri);
           setIsDownloading(false);
           return;
-        } else {
-          // It's a partial file. It might be downloading natively in the background, or it was interrupted.
-          // Since we can't safely resume a force-killed download without resumeData in Expo, we delete it to restart.
-          await FileSystem.deleteAsync(localUri, { idempotent: true });
-          setDownloadStatus(`Cleaning up partial download...`);
         }
+        // A wrong-sized file under the final name, left by an older version of the app.
+        await FileSystem.deleteAsync(finalUri, { idempotent: true });
       }
 
-      setDownloadStatus(`Downloading ${file.path}...`);
+      // Pick up where an interrupted download stopped, where the platform allows it.
+      const partInfo = await FileSystem.getInfoAsync(partUri);
+      const resumeData = partInfo.exists ? resumeDataFor(partInfo.size, expectedSize) : undefined;
+      if (partInfo.exists && !resumeData) await FileSystem.deleteAsync(partUri, { idempotent: true });
+      await savePendingDownload({
+        url: downloadUrl,
+        partUri,
+        finalUri,
+        model: { id: model.id, name: model.name, recommended: !!model.recommended },
+        file,
+      });
+
+      const startedAt = resumeData ? Number(resumeData) : 0;
+      setDownloadProgress((startedAt / expectedSize) * 100);
+      setDownloadStatus(resumeData ? `Resuming ${file.path} at ${formatGB(startedAt)}...` : `Downloading ${file.path}...`);
+      // Keeps the download going with the screen off (Android); shows its progress as a notification.
+      await startWork('download', { title, text: file.path.split('/').pop(), progress: (startedAt / expectedSize) * 100 });
       const downloadResumable = FileSystem.createDownloadResumable(
         downloadUrl,
-        localUri,
+        partUri,
         {
           sessionType: FileSystem.FileSystemSessionType.BACKGROUND
         },
         (progress) => {
-          const percent = (progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * 100;
+          // Against the known file size: the server's content length is only the part still to come.
+          const percent = (progress.totalBytesWritten / expectedSize) * 100;
           setDownloadProgress(percent);
-        }
+          updateWork('download', { title, text: `${formatGB(progress.totalBytesWritten)} of ${formatGB(expectedSize)}`, progress: percent });
+        },
+        resumeData
       );
       downloadResumableRef.current = downloadResumable;
 
@@ -460,11 +552,12 @@ export default function App() {
         setIsDownloading(false);
       }
     } catch (err) {
+      const cancelled = !!err.message && err.message.toLowerCase().includes('cancel');
+      stopWork('download', isAway() && !cancelled ? { title: 'Download stopped', text: `${model.name}: open the app to resume it.` } : undefined);
       console.log(`App Alert: Download failed: ${err.message}`);
-      if (err.message && err.message.toLowerCase().includes('cancel')) {
-        // Ignored deliberate cancel
-      } else {
-        alert(`Download failed: ${err.message}`);
+      if (!cancelled) {
+        const resumable = await loadPendingDownload().catch(() => null);
+        alert(`Download failed: ${err.message}${resumable ? '\n\nWhat was downloaded is kept, so you can resume it from the list.' : ''}`);
       }
       setIsDownloading(false);
     }
@@ -534,6 +627,46 @@ export default function App() {
   const updateToolEntry = (id, patch) =>
     setChatLog(prev => prev.map(entry => (entry.role === 'tool' && entry.id === id ? { ...entry, ...patch } : entry)));
 
+  // Callbacks registered once (below) read the current functions and values from here.
+  useEffect(() => {
+    latestRef.current = { isBusy, modelUri, handleLoadModel, stopGeneration, cancelDownload, updateLastAssistant };
+  });
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      const latest = latestRef.current;
+      if (state === 'active') {
+        dismissFinishedWork();
+        // iOS took the GPU away mid-reply. llama.cpp's Metal backend then fails every later
+        // reply until it's recreated, which means loading the model again, once the stopped
+        // reply has wound down (reloading frees the context it's still using).
+        if (reloadAfterBackgroundRef.current) {
+          reloadAfterBackgroundRef.current = false;
+          Promise.resolve(activeSendRef.current)
+            .catch(() => {})
+            .then(() => latestRef.current.modelUri && latestRef.current.handleLoadModel(latestRef.current.modelUri));
+        }
+        return;
+      }
+      // iOS doesn't let apps use the GPU in the background, so a reply can't continue there.
+      // Stop it while the app is still on its way out. (Android keeps going: see startReplyWork.)
+      if (Platform.OS === 'ios' && latest.isBusy) {
+        reloadAfterBackgroundRef.current = true;
+        latest.updateLastAssistant({ stoppedInBackground: true });
+        latest.stopGeneration();
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Buttons on the background notifications.
+  useEffect(() => {
+    const sub = addWorkActionListener((action) => {
+      if (action === 'cancel-download') latestRef.current.cancelDownload?.();
+    });
+    return () => sub.remove();
+  }, []);
+
   // Agent mode: the agent loop drives llama.rn with the MCP tools and reports each step,
   // which becomes assistant bubbles and tool cards in the chat log. With offerTools false it
   // is a single templated chat turn (used for thinking, which needs the model's template).
@@ -546,6 +679,8 @@ export default function App() {
 
     const system = offerTools ? buildAgentSystemPrompt(systemPrompt, mcp.manager, mcp.disabled) : systemPrompt;
     const messages = trimHistory(chatLogToMessages([...currentLog, { role: 'user', text: userMsg }], system), AGENT_HISTORY_CHARS);
+    const reply = startReplyWork(userMsg);
+    let replyText = '';
 
     const onEvent = (event) => {
       if (!isLive()) return;
@@ -556,13 +691,16 @@ export default function App() {
           break;
         case 'content':
           updateLastAssistant({ text: event.text });
+          reply.update(event.text);
           scrollViewRef.current?.scrollToEnd({ animated: false });
           break;
         case 'reasoning':
           updateLastAssistant({ reasoning: event.text });
+          reply.update(event.text, 'Odysseus is thinking');
           scrollViewRef.current?.scrollToEnd({ animated: false });
           break;
         case 'assistant':
+          if (event.content) replyText = event.content;
           updateLastAssistant({
             text: event.content,
             ...(event.reasoning ? { reasoning: event.reasoning } : {}),
@@ -570,6 +708,10 @@ export default function App() {
           });
           break;
         case 'tool_call':
+          reply.update(
+            event.needsApproval ? `${displayToolName(event.call.name)} needs your OK. Open the app to allow or deny it.` : `Running ${displayToolName(event.call.name)}…`,
+            event.needsApproval ? 'Odysseus is waiting for you' : 'Odysseus is using a tool'
+          );
           setChatLog(prev => [...prev, {
             role: 'tool',
             id: event.call.id,
@@ -612,6 +754,7 @@ export default function App() {
       console.log(`App Alert: Agent turn failed: ${msg}`);
       alert(`Agent turn failed: ${msg}`);
     } finally {
+      reply.finish(replyText);
       if (isLive()) {
         activeAgentRunRef.current = null;
         clearPendingApprovals(false);
@@ -620,7 +763,7 @@ export default function App() {
     }
   };
 
-  const sendMessage = async () => {
+  const sendMessageNow = async () => {
     if (!inputText.trim() || !isReady || isBusy) return;
 
     const userMsg = inputText.trim();
@@ -657,7 +800,11 @@ export default function App() {
     });
     prompt += `User: ${userMsg}\nAssistant:`;
 
+    const reply = startReplyWork(userMsg);
+    let replyText = '';
     await generate(prompt, (token) => {
+      replyText += token;
+      reply.update(replyText);
       setChatLog(prev => {
         const newLog = [...prev];
         const lastIndex = newLog.length - 1;
@@ -666,6 +813,17 @@ export default function App() {
       });
       scrollViewRef.current?.scrollToEnd({ animated: false });
     });
+    reply.finish(replyText);
+  };
+
+  // Every send goes through here so the reply in progress can be awaited (see the iOS reload).
+  const sendMessage = () => {
+    const send = sendMessageNow();
+    activeSendRef.current = send;
+    send.finally(() => {
+      if (activeSendRef.current === send) activeSendRef.current = null;
+    });
+    return send;
   };
 
   return (
@@ -818,7 +976,29 @@ export default function App() {
                       </View>
                     </View>
                   )}
-                  {localModels.length === 0 && !isDownloading ? (
+                  {!isDownloading && pendingDownload && (
+                    <View style={[styles.downloadContainer, { marginHorizontal: 0, marginTop: 0, marginBottom: 20 }]}>
+                      <Text style={styles.downloadStatus}>Download interrupted: {pendingDownload.model.name}</Text>
+                      <View style={styles.progressBarBg}>
+                        <View style={[styles.progressBarFill, { width: `${Math.min(100, (pendingDownload.bytesOnDisk / pendingDownload.file.size) * 100)}%` }]} />
+                      </View>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
+                        <Text style={styles.downloadPercent}>{formatGB(pendingDownload.bytesOnDisk)} of {formatGB(pendingDownload.file.size)}</Text>
+                        <View style={{ flexDirection: 'row', gap: 15 }}>
+                          <TouchableOpacity onPress={resumePendingDownload}>
+                            {/* iOS can only resume within one session, so there it starts over. */}
+                            <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>
+                              {Platform.OS === 'android' ? '[RESUME]' : '[RESTART]'}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => discardPendingDownload()}>
+                            <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[DEL]</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                  )}
+                  {localModels.length === 0 && !isDownloading && !pendingDownload ? (
                     <Text style={{ color: theme.colors.border, fontFamily: monoFont, textAlign: 'center', marginTop: 20 }}>No models downloaded yet.</Text>
                   ) : (
                     localModels.map((m, i) => (
@@ -880,6 +1060,9 @@ export default function App() {
                     <Text style={styles.messageText} selectable={true}>
                       {body}
                     </Text>
+                  )}
+                  {msg.stoppedInBackground && (
+                    <Text style={styles.stoppedNote}>{"Stopped when the app left the screen: iOS doesn't let apps use the GPU in the background."}</Text>
                   )}
                 </View>
               );
@@ -1199,6 +1382,12 @@ const styles = StyleSheet.create({
     color: theme.colors.fg,
     fontFamily: monoFont,
     lineHeight: 20,
+  },
+  stoppedNote: {
+    marginTop: 8,
+    fontSize: 11,
+    color: theme.colors.border,
+    fontFamily: monoFont,
   },
   inputContainer: {
     paddingHorizontal: 15,

@@ -14,7 +14,8 @@ This is that experiment: a local LLM chat app that fits in your pocket, built wi
 
 - **Fully on-device inference.** Models run through llama.cpp on the phone itself, and replies stream in token by token. No server, no account, no API key.
 - **Hardware-aware Cookbook.** Browse the 100 trending GGUF text-generation models on Hugging Face, or search all of them. **Recommended** at the top lists the models in [Tested models](#tested-models). Filter pills narrow the list by what fits your phone, size, thinking, tool use, MoE and model family. The app reads your phone's RAM, estimates what each model needs, and greys out the ones that won't fit. Models that fit come first, smallest first. The lists are cached, so you can still browse them offline.
-- **Resumable downloads.** Picks the best 4-bit file that fits your phone (`Q4_K_M` first), looking in subfolders too. It skips files that can't load on their own: vision projectors (`mmproj`), parts of split models, adapters and draft models. It asks first if the file looks too big for your RAM. Downloads show progress and can be paused, resumed or cancelled. The file size must match exactly, then the model loads automatically.
+- **Resumable downloads.** Picks the best 4-bit file that fits your phone (`Q4_K_M` first), looking in subfolders too. It skips files that can't load on their own: vision projectors (`mmproj`), parts of split models, adapters and draft models. It asks first if the file looks too big for your RAM. Downloads show progress and can be paused, resumed or cancelled. A download is saved as `<name>.gguf.part` and only gets its real name once its size matches exactly, so a half-downloaded file never shows up as a model. If a download gets cut off, **[MODELS]** shows it with **[RESUME]**, which continues from where it stopped on Android (on iOS it starts over). Then the model loads automatically.
+- **Keeps working in the background (Android).** Downloads and replies keep going with the screen off or while you use another app. A notification shows the download's progress, with **Cancel**, or the reply as it's being written. On Android 16 these show as Live Updates, a chip in the status bar. If a download or reply finishes while you're away, a notification tells you.
 - **Load failure reports.** If a model fails to load, or crashes the app while loading, the app says what probably went wrong and offers to report it. **Report on GitHub** opens a pre-filled issue with the model, your phone, and llama.cpp's log, for you to check before submitting. **Share** sends the same report anywhere else. A model that crashed the app isn't loaded again automatically.
 - **Bring your own model.** Import any `.gguf` file from your phone's storage.
 - **Model library.** See your downloaded models, switch between them and delete the ones you're done with. The last model you used reloads when you open the app.
@@ -98,6 +99,8 @@ The tool layer follows the MCP design of the Odysseus desktop app. Each MCP serv
 - Thinking is capped at 1,024 tokens. After that the model is told to stop thinking and answer. The thinking is shown but not sent back to the model in later turns, to save context.
 - RAM estimates come from the parameter count Hugging Face reports for the GGUF, or from the model's name (like `3B`) when it doesn't. Models with neither show "RAM ?".
 - The internet is only used to fetch the Cookbook list, download models, and talk to any remote MCP servers you add.
+- **On iOS, replies stop when you leave the app.** iOS doesn't let apps use the GPU in the background, and llama.cpp can't keep running on the GPU once iOS takes it away. So the app stops the reply as you leave, marks it as stopped, and reloads the model when you come back. Downloads on iOS do keep going in the background, through the system's own download service.
+- **Android background work** uses a foreground service: `dataSync` for downloads and `specialUse` for replies, which Google Play reviews if the app is ever published there. On Android 15 and newer, a download can run in the background for at most 6 hours a day.
 
 ## Building from source
 
@@ -154,6 +157,8 @@ It waits for the build to finish, converts the newest `.aab` into a universal AP
 | `src/cookbook/` | Cookbook data: which GGUF file to download, model facts and filters, the Tested models parser |
 | `src/diagnostics/` | Model load failure reports: llama.cpp log capture, crash detection, the GitHub issue |
 | `src/repo.ts` | This repo's name, used for the README and for issues |
+| `src/downloads/pendingDownload.ts` | The download in progress, so an interrupted one can be resumed |
+| `modules/background-work/` | Local Expo module (Android): the foreground service and notifications that keep downloads and replies running in the background |
 | `.github/ISSUE_TEMPLATE/model-load-failure.yml` | The issue form that load failure reports open |
 | `src/hooks/useLlama.ts` | Loads models and generates replies with llama.rn, including tool-calling rounds |
 | `src/hooks/useChatStore.js` | Saves conversations on the device |

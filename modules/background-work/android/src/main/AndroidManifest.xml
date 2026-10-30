@@ -1,0 +1,30 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Merged into the app manifest at build time, so android/ stays generated (CNG). -->
+
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <!-- Model downloads. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <!-- Generating a reply on the device (no standard foreground service type fits). -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <!-- Keeps the CPU running with the screen off. -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <!-- Asked at runtime on Android 13+; without it the work still runs, just without a visible notification. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- Android 16 Live Updates: lets the progress notification show as a status bar chip. -->
+  <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+
+  <application>
+    <service
+      android:name="expo.modules.backgroundwork.BackgroundWorkService"
+      android:exported="false"
+      android:foregroundServiceType="dataSync|specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Generating a reply with an on-device language model while the app is in the background" />
+    </service>
+
+    <receiver
+      android:name="expo.modules.backgroundwork.NotificationActionReceiver"
+      android:exported="false" />
+  </application>
+</manifest>
