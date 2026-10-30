@@ -28,13 +28,14 @@ import { useChatStore } from './src/hooks/useChatStore';
 import { useMcp } from './src/hooks/useMcp';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookbookMenu from './src/components/CookbookMenu';
+import CookbookHint from './src/components/CookbookHint';
 import McpPanel from './src/components/McpPanel';
 import ToolCallCard from './src/components/ToolCallCard';
 import ThinkingBlock from './src/components/ThinkingBlock';
 import { runAgentTurn, buildAgentSystemPrompt, trimHistory } from './src/mcp/agentLoop';
 import { chatLogToMessages } from './src/mcp/chatLog';
 import { setAgentMode } from './src/mcp/runtime';
-import { pickGgufFile } from './src/cookbook/ggufPicker';
+import { COMFORTABLE_RAM_SHARE, pickGgufFile } from './src/cookbook/ggufPicker';
 import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
 import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad } from './src/diagnostics/loadDiagnostics';
 import { clearPendingDownload, loadPendingDownload, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
@@ -142,6 +143,26 @@ export default function App() {
   const activeAgentRunRef = useRef(null);
 
   const inputRef = useRef(null);
+
+  // With no model loaded, a tap on the chat or the input bar draws an arrow to the Cookbook.
+  const cookbookBtnRef = useRef(null);
+  const cookbookHintRef = useRef(null);
+  const tapStartRef = useRef(null);
+  const hintTap = {
+    onTouchStart: (e) => {
+      const { pageX, pageY } = e.nativeEvent;
+      tapStartRef.current = { pageX, pageY, at: Date.now() };
+    },
+    onTouchEnd: (e) => {
+      const start = tapStartRef.current;
+      tapStartRef.current = null;
+      if (!start || isReady || isInitializing || isDownloading) return;
+      const { pageX, pageY } = e.nativeEvent;
+      // Only taps: not scrolls or long presses.
+      if (Math.hypot(pageX - start.pageX, pageY - start.pageY) > 10 || Date.now() - start.at > 600) return;
+      cookbookHintRef.current?.show(pageX, pageY);
+    },
+  };
   const downloadResumableRef = useRef(null);
   // The model and file being downloaded, for when the download finishes (directly or after a resume).
   const currentDownloadRef = useRef(null);
@@ -483,9 +504,11 @@ export default function App() {
       if (!treeRes.ok) throw new Error("Failed to fetch model tree from HuggingFace");
       const tree = await treeRes.json();
 
-      // Leave room for the system, like the Cookbook's RAM estimate does.
+      // Leave room for the system, like the Cookbook's RAM estimate does, and go for a
+      // higher-quality file when one is small enough to run comfortably.
       const maxBytes = Device.totalMemory ? Device.totalMemory - SYSTEM_RAM_GB * GB : undefined;
-      const pick = pickGgufFile(tree, model.file, maxBytes);
+      const comfortableBytes = Device.totalMemory ? Device.totalMemory * COMFORTABLE_RAM_SHARE : undefined;
+      const pick = pickGgufFile(tree, model.file, maxBytes, comfortableBytes);
       if (!pick.ok) throw new Error(pick.error);
       const file = pick.file;
       if (!pick.fits && !(await confirmLargeDownload(file))) {
@@ -843,9 +866,12 @@ export default function App() {
             <View style={styles.topBarCenter}>
               {isReady && <Text style={styles.topBarStats}>ready • 0.0s</Text>}
             </View>
-            <TouchableOpacity onPress={() => setIsCookbookVisible(true)} style={styles.cookbookHeaderBtn}>
-              <Text style={styles.cookbookHeaderBtnText}>Cookbook</Text>
-            </TouchableOpacity>
+            {/* Wrapped so the Cookbook hint can measure where the button is */}
+            <View ref={cookbookBtnRef} collapsable={false}>
+              <TouchableOpacity onPress={() => setIsCookbookVisible(true)} style={styles.cookbookHeaderBtn}>
+                <Text style={styles.cookbookHeaderBtnText}>Cookbook</Text>
+              </TouchableOpacity>
+            </View>
           </View>
           {error && <Text style={styles.errorText}>Error: {error}</Text>}
 
@@ -1029,6 +1055,7 @@ export default function App() {
             contentContainerStyle={{ paddingBottom: 16 }}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
+            {...hintTap}
           >
             {chatLog.map((msg, index) => {
               if (msg.role === 'tool') {
@@ -1140,7 +1167,7 @@ export default function App() {
           )}
 
           {/* Input Area */}
-          <View style={styles.inputContainer}>
+          <View style={styles.inputContainer} {...hintTap}>
             {/* Dropdown Menu */}
             {isMenuVisible && (
               <Animated.View
@@ -1259,6 +1286,7 @@ export default function App() {
             </View>
           </View>
         </KeyboardAvoidingView>
+        <CookbookHint ref={cookbookHintRef} targetRef={cookbookBtnRef} />
       </SafeAreaView>
     </SafeAreaProvider>
   );

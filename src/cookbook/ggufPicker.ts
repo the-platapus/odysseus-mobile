@@ -54,6 +54,16 @@ const QUANT_RANK: [RegExp, string][] = [
   [/IQ1_/, 'IQ1'],
 ];
 const UNKNOWN_RANK = QUANT_RANK.length;
+
+// Quality first when the phone has room for it: small models lose more to 4-bit quantization
+// than big ones, and the bigger file costs little when it's small next to the phone's RAM.
+// Full precision isn't listed: in practice it's no better than Q8_0, and twice the size.
+const QUALITY_ORDER = ['Q8_0', 'Q6_K', 'Q5_K_M', 'Q5_K_XL', 'Q5_K_S', 'Q5_0'];
+/**
+ * The share of the phone's RAM a file can take and still run comfortably. On a 4 GB iPhone 13,
+ * Qwen3 0.6B Q8_0 (0.64 GB) ran smoothly, while MiniCPM5 2B Q4_K_M (1.56 GB) made the system UI lag.
+ */
+export const COMFORTABLE_RAM_SHARE = 0.25;
 const FULL_PRECISION = /(?:^|[-_.])(F16|BF16|F32|FP16|FP32)(?:[-_.]|$)/;
 
 const basename = (path: string) => path.split('/').pop() ?? path;
@@ -88,8 +98,10 @@ export function unloadableReason(path: string, size = 0): string | null {
  * @param preferred exact path to use, e.g. from the Recommended list
  * @param maxBytes  largest file the phone can likely hold in RAM; the best-ranked file under it
  *                  wins, otherwise the best-ranked file overall is returned with fits=false
+ * @param comfortableBytes largest file that runs comfortably (see COMFORTABLE_RAM_SHARE); the
+ *                  highest-quality file under it (Q8_0 down to Q5) wins over the 4-bit ranking
  */
-export function pickGgufFile(tree: HfTreeEntry[], preferred?: string, maxBytes?: number): PickResult {
+export function pickGgufFile(tree: HfTreeEntry[], preferred?: string, maxBytes?: number, comfortableBytes?: number): PickResult {
   const files = tree.filter((e) => e.type === 'file' && e.path.toLowerCase().endsWith('.gguf'));
   const fitsIn = (size: number) => !maxBytes || !size || size <= maxBytes;
 
@@ -117,6 +129,13 @@ export function pickGgufFile(tree: HfTreeEntry[], preferred?: string, maxBytes?:
   // has nothing with a known quant; a fitting "unknown" must not win over a real quant.
   const known = loadable.filter((f) => f.rank < UNKNOWN_RANK);
   const pool = known.length ? known : loadable;
+  if (comfortableBytes) {
+    for (const quant of QUALITY_ORDER) {
+      // Smallest first within a quant (the pool is sorted by size), so plain Q8_0 beats Q8_K_XL.
+      const roomy = pool.find((f) => f.quant === quant && f.size > 0 && f.size <= comfortableBytes && fitsIn(f.size));
+      if (roomy) return { ok: true, file: { path: roomy.path, size: roomy.size, quant: roomy.quant }, fits: true };
+    }
+  }
   const best = pool.find((f) => fitsIn(f.size)) ?? pool[0];
   return { ok: true, file: { path: best.path, size: best.size, quant: best.quant }, fits: fitsIn(best.size) };
 }
