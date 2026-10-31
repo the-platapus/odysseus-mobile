@@ -5,7 +5,8 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0d1117",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "dev",
@@ -23,16 +24,21 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#1b1c1d"
+        }
+      ]
+    ],
     "extra": {
       "eas": {
         "projectId": "d5cfce01-ccf6-43d7-832d-f99bcfd7a7f4"
       }
-    },
-    "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#1b1c1d",
-      "imageWidth": 257
     }
   }
 }
