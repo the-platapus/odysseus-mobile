@@ -1,4 +1,4 @@
-import { ScrollView, TouchableOpacity, Text, TextInput, StyleSheet, View, Platform, ActivityIndicator } from 'react-native';
+import { ScrollView, TouchableOpacity, Text, TextInput, StyleSheet, View, Platform } from 'react-native';
 import { useState, useEffect } from 'react';
 import * as Device from 'expo-device';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -15,12 +15,13 @@ import {
   parseRecommended,
 } from '../cookbook/catalog';
 import { README_RAW_URL } from '../repo';
-import theme from '../../theme.json';
+import { theme, themed } from '../theme';
+import LoadingWave from './LoadingWave';
 
 const TRENDING_CACHE_KEY = '@odysseus_cookbook_cache_v2';
 const RECOMMENDED_CACHE_KEY = '@odysseus_recommended_cache';
 const OK_GREEN = '#6bc46d';
-const CARD_COLORS = [theme.colors.fg, theme.colors.red, theme.colors.border, theme.colors.fg];
+const CARD_COLORS = themed(() => [theme.colors.fg, theme.colors.red, theme.colors.border, theme.colors.fg]);
 
 const formatDownloads = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
@@ -200,7 +201,7 @@ export default function CookbookMenu({ onSelectModel }) {
           autoCorrect={false}
           returnKeyType="search"
         />
-        {isSearching && <ActivityIndicator size="small" color={theme.colors.fg} style={styles.searchSpinner} />}
+        {isSearching && <LoadingWave color={theme.colors.fg} style={styles.searchSpinner} />}
         {!!query && !isSearching && (
           <TouchableOpacity onPress={() => setQuery('')} style={styles.searchClear} hitSlop={8}>
             <Text style={styles.chipText}>[x]</Text>
@@ -228,7 +229,7 @@ export default function CookbookMenu({ onSelectModel }) {
       </ScrollView>
 
       {trending === null ? (
-        <ActivityIndicator style={{ paddingVertical: 20 }} color="#007AFF" />
+        <LoadingWave label="Fetching models" size={13} style={{ paddingVertical: 20, textAlign: 'center' }} />
       ) : (
         <ScrollView
           showsVerticalScrollIndicator={false}
@@ -273,7 +274,7 @@ export default function CookbookMenu({ onSelectModel }) {
 
 const monoFont = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
-const styles = StyleSheet.create({
+const styles = themed(() => StyleSheet.create({
   container: {
     flex: 1, // Allow it to fill vertical space if placed in a flex parent
     paddingTop: 15,
@@ -459,4 +460,4 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontFamily: monoFont,
   }
-});
+}));

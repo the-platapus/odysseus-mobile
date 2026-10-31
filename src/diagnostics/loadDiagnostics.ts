@@ -165,10 +165,10 @@ export async function takeInterruptedReply(): Promise<{ uri: string; reply: Repl
     return null;
   }
   if (!saved?.uri) return null;
-  const { uri, startedAt, savedAt, mode, thinking, promptChars, maxTokens, tokens } = saved;
+  const { uri, startedAt, savedAt, mode, thinking, promptChars, tokens } = saved;
   return {
     uri,
-    reply: { mode, thinking, promptChars, maxTokens, tokens, seconds: Math.round((savedAt - startedAt) / 1000) },
+    reply: { mode, thinking, promptChars, tokens, seconds: Math.round((savedAt - startedAt) / 1000) },
     log: readSavedLog(replyLogFile()),
   };
 }

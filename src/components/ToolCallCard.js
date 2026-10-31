@@ -1,18 +1,19 @@
 import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { useState } from 'react';
 import { displayToolName } from '../mcp/manager';
-import theme from '../../theme.json';
+import { theme, themed } from '../theme';
+import LoadingWave from './LoadingWave';
 
 const monoFont = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 const OK_GREEN = '#6bc46d';
 
-const STATUS = {
+const STATUS = themed(() => ({
   approval: { label: 'needs approval', color: theme.colors.red },
   running: { label: 'running', color: theme.colors.border },
   done: { label: 'done', color: OK_GREEN },
   error: { label: 'error', color: theme.colors.red },
   denied: { label: 'denied', color: theme.colors.red },
-};
+}));
 
 const prettyArgs = (raw) => {
   if (!raw) return '{}';
@@ -39,7 +40,11 @@ export default function ToolCallCard({ entry, canApprove, onApprove, onApproveFo
     <View style={[styles.card, awaiting && styles.cardAwaiting]}>
       <View style={styles.headerRow}>
         <Text style={styles.name} numberOfLines={1}>⚙ {displayToolName(entry.name)}</Text>
-        <Text style={[styles.status, { color: status.color }]}>[{awaiting && !canApprove ? 'expired' : status.label}]</Text>
+        {entry.status === 'running' ? (
+          <LoadingWave label={`[${status.label}]`} color={status.color} style={styles.status} />
+        ) : (
+          <Text style={[styles.status, { color: status.color }]}>[{awaiting && !canApprove ? 'expired' : status.label}]</Text>
+        )}
       </View>
       <Text style={styles.args} numberOfLines={expanded ? undefined : 2} selectable>{prettyArgs(entry.args)}</Text>
 
@@ -69,7 +74,7 @@ export default function ToolCallCard({ entry, canApprove, onApprove, onApproveFo
   );
 }
 
-const styles = StyleSheet.create({
+const styles = themed(() => StyleSheet.create({
   card: {
     alignSelf: 'flex-start',
     maxWidth: '95%',
@@ -138,4 +143,4 @@ const styles = StyleSheet.create({
     fontFamily: monoFont,
     fontSize: 11,
   },
-});
+}));

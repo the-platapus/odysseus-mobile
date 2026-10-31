@@ -4,7 +4,6 @@ import {
   TextInput,
   TouchableOpacity,
   ScrollView,
-  ActivityIndicator,
   StyleSheet,
   Platform,
   LayoutAnimation,
@@ -23,18 +22,19 @@ import {
   importFilesToWorkspace,
   listFsRoot,
 } from '../mcp/runtime';
-import theme from '../../theme.json';
+import { theme, themed } from '../theme';
+import LoadingWave from './LoadingWave';
 
 const monoFont = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 const OK_GREEN = '#6bc46d';
 
-const STATUS_COLORS = {
+const STATUS_COLORS = themed(() => ({
   connected: OK_GREEN,
   connecting: theme.colors.border,
   error: theme.colors.red,
   timeout: theme.colors.red,
   disconnected: theme.colors.border,
-};
+}));
 
 const TOOL_SUPPORT_TEXT = {
   native: 'Loaded model: native tool calling.',
@@ -112,7 +112,7 @@ function ServerCard({ config, state, tools }) {
               <Text style={[styles.actionText, { color: theme.colors.red }]}>[DEL]</Text>
             </TouchableOpacity>
           )}
-          {busy && <ActivityIndicator size="small" color={theme.colors.fg} />}
+          {busy && <LoadingWave color={theme.colors.fg} />}
         </View>
         <Toggle
           on={config.enabled}
@@ -233,7 +233,7 @@ function AddServerTab({ onAdded }) {
         secureTextEntry
       />
       <TouchableOpacity style={[styles.primaryBtn, busy && { opacity: 0.5 }]} onPress={submit} disabled={busy}>
-        {busy ? <ActivityIndicator color={theme.colors.fg} /> : <Text style={styles.primaryBtnText}>Connect & Save</Text>}
+        {busy ? <LoadingWave label="Connecting" color={theme.colors.fg} size={13} /> : <Text style={styles.primaryBtnText}>Connect & Save</Text>}
       </TouchableOpacity>
       {!!error && <Text style={styles.errorText}>{error}</Text>}
       <Text style={styles.muted}>
@@ -292,12 +292,12 @@ function FilesTab({ mcp }) {
               <Text style={styles.actionText}>[IMPORT FILES]</Text>
             </TouchableOpacity>
           )}
-          {busy && <ActivityIndicator size="small" color={theme.colors.fg} />}
+          {busy && <LoadingWave color={theme.colors.fg} />}
         </View>
       </View>
 
       <Text style={styles.sectionTitle}>{'Contents of "/"'}</Text>
-      {entries === null && <ActivityIndicator color={theme.colors.fg} />}
+      {entries === null && <LoadingWave label="Loading files" color={theme.colors.fg} />}
       {entries?.length === 0 && <Text style={styles.muted}>Empty. Import files, or ask the model to create some.</Text>}
       {entries
         ?.slice()
@@ -353,7 +353,7 @@ export default function McpPanel({ onClose, toolSupport, isModelReady }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = themed(() => StyleSheet.create({
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -504,4 +504,4 @@ const styles = StyleSheet.create({
     fontFamily: monoFont,
     fontSize: 13,
   },
-});
+}));

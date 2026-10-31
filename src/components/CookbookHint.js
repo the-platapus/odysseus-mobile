@@ -1,6 +1,6 @@
 import { Animated, Easing, StyleSheet, View } from 'react-native';
 import { useEffect, useImperativeHandle, useRef, useState } from 'react';
-import theme from '../../theme.json';
+import { theme, themed } from '../theme';
 
 // The arrow is a curve of short, overlapping strokes that appear one after another, so it
 // draws itself without an SVG library.
@@ -155,7 +155,7 @@ export default function CookbookHint({ ref, targetRef, radius = 8 }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = themed(() => StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
     pointerEvents: 'none',
@@ -172,4 +172,4 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.red,
     boxShadow: `0 0 12px 2px ${theme.colors.red}`,
   },
-});
+}));

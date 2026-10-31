@@ -11,7 +11,6 @@ export type ReplyProgress = {
   mode: 'plain' | 'template' | 'agent';
   thinking: boolean;
   promptChars: number;
-  maxTokens: number;
   tokens: number;
   seconds: number;
 };
@@ -132,7 +131,7 @@ export function buildIssue(f: LoadFailure): IssueFields {
   const r = f.reply;
   const error = [
     r
-      ? `The app closed while the model was answering (crash or killed by the system). By its last save the reply had ${r.tokens} tokens after ${r.seconds} s (${r.mode} prompt of ${r.promptChars} characters, thinking ${r.thinking ? 'on' : 'off'}, up to ${r.maxTokens} tokens).`
+      ? `The app closed while the model was answering (crash or killed by the system). By its last save the reply had ${r.tokens} tokens after ${r.seconds} s (${r.mode} prompt of ${r.promptChars} characters, thinking ${r.thinking ? 'on' : 'off'}).`
       : f.kind === 'crash'
         ? 'The app closed while loading the model (crash or killed by the system).'
         : `\`${redactPaths(f.error ?? 'Unknown error')}\``,

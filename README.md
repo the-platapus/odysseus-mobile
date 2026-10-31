@@ -16,11 +16,13 @@ This is that experiment: a local LLM chat app that fits in your pocket, built wi
 - **Hardware-aware Cookbook.** Browse the 100 trending GGUF text-generation models on Hugging Face, or search all of them. **Recommended** at the top lists the models in [Tested models](#tested-models). Filter pills narrow the list by what fits your phone, size, thinking, tool use, MoE and model family. The app reads your phone's RAM, estimates what each model needs, and greys out the ones that won't fit. Models that fit come first, smallest first. The lists are cached, so you can still browse them offline.
 - **Resumable downloads.** Picks the best-quality file your phone can run comfortably: `Q8_0` down to `Q5` when the file takes up to a quarter of your RAM, which is usually the case for small models, otherwise the best 4-bit file that fits (`Q4_K_M` first). It looks in subfolders too. It skips files that can't load on their own: vision projectors (`mmproj`), parts of split models, adapters and draft models. It asks first if the file looks too big for your RAM. Downloads show progress and can be paused, resumed or cancelled. A download is saved as `<name>.gguf.part` and only gets its real name once its size matches exactly, so a half-downloaded file never shows up as a model. If a download gets cut off, **[MODELS]** shows it with **[RESUME]**, which continues from where it stopped on Android (on iOS it starts over). A `.part` file that no download points to can't be resumed, so it's deleted. Then the model loads automatically.
 - **Keeps working in the background (Android).** Downloads and replies keep going with the screen off or while you use another app. A notification shows the download's progress, with **Cancel**, or the reply as it's being written. On Android 16 these show as Live Updates, a chip in the status bar. If a download or reply finishes while you're away, a notification tells you.
-- **Load failure reports.** If a model fails to load, or crashes the app while loading, the app says what probably went wrong and offers to report it. **Report on GitHub** opens a pre-filled issue with the model, your phone, and llama.cpp's log, for you to check before submitting. **Share** sends the same report anywhere else. A model that crashed the app isn't loaded again automatically.
+- **Failure reports.** If a model fails to load, crashes the app while loading, or the app closes while it's answering (usually the phone running out of memory, which iOS doesn't log), the app says what probably went wrong and offers to report it the next time it opens. **Report on GitHub** opens a pre-filled issue with the model, your phone, and llama.cpp's log, for you to check before submitting. **Share** sends the same report anywhere else. A model that crashed the app isn't loaded again automatically.
 - **Bring your own model.** Import any `.gguf` file from your phone's storage.
 - **Model library.** See your downloaded models, switch between them and delete the ones you're done with. The last model you used reloads when you open the app.
-- **Chat history.** Keep multiple conversations, saved on the device.
-- **Custom system prompt.** Change how the assistant behaves.
+- **Chat history.** Keep multiple conversations, saved on the device. **Export chat** saves one as a text file to share, like WhatsApp's, with the model behind each reply, its thinking and its tool calls.
+- **Themes.** Pick one of the 19 built-in themes from Odysseus, or make up to 8 of your own.
+- **Personas.** Odysseus' five presets (Socrates, Razor, Nietzsche, Spark and Odysseus), or your own. A persona sets the system prompt and the temperature, and named ones label their replies with the name.
+- **Response timer.** A reply shows how long it's been waiting for its first token, the top bar counts the whole reply, and each reply keeps its time.
 - **Thinking mode.** For models that can reason before answering (Qwen3, DeepSeek-R1 distills, gpt-oss, Gemma 4 and others), switch thinking on or off. The model's thinking streams into a collapsible block above its reply.
 - **Agent mode with MCP tools.** The model can call tools through the [Model Context Protocol](https://modelcontextprotocol.io), using llama.cpp's native tool calling with each model's own chat template. Built in: file tools (in a private workspace, or a phone folder you pick) and a memory the model can save facts to. You can also connect remote MCP servers over Streamable HTTP. Tools that change something ask you first.
 
@@ -75,8 +77,8 @@ Download the latest build from the [Releases page](https://github.com/the-platap
 Where everything else lives:
 
 - **[MODELS]** (in the Cookbook) lists your downloaded models and has **Pick & Load Model (.gguf)** for importing your own file.
-- **☰** (top left) opens your chat history and **+ New Conversation**.
-- **+** (next to the message box) opens the menu with **System Prompt** and **MCP**.
+- **☰** (top left) opens your chat history and **+ New Conversation**. Long-press a conversation for **Export chat**. **Theme**, at the bottom, opens the Theme screen.
+- **+** (next to the message box) opens the menu with **Persona** and **MCP**.
 - **agent: off** (above the message box, right) switches agent mode on and off. Long-press it to open **MCP**.
 - **think: off** (next to it) switches thinking on and off. It only appears when the loaded model can think. The setting is remembered across models.
 
@@ -97,9 +99,10 @@ The tool layer follows the MCP design of the Odysseus desktop app. Each MCP serv
 
 ## Good to know
 
-- The context window is 4,096 tokens. Chats use the model's own chat template, and replies can run to 1,024 tokens.
-- Models without a usable chat template fall back to a plain `User:` / `Assistant:` transcript. There, each reply is capped at 256 tokens and ends at the first blank line, and the model may start writing both sides of the conversation.
-- Thinking is capped at 1,024 tokens. After that the model is told to stop thinking and answer. The thinking is shown but not sent back to the model in later turns, to save context.
+- The context window is 4,096 tokens. Chats use the model's own chat template.
+- Replies and thinking have no length limit: a reply ends when the model finishes or the context window is full, and **■** stops it sooner.
+- Models without a usable chat template fall back to a plain `User:` / `Assistant:` transcript. There, a reply also ends at the first blank line, and the model may start writing both sides of the conversation.
+- The thinking is shown but not sent back to the model in later turns, to save context.
 - RAM estimates come from the parameter count Hugging Face reports for the GGUF, or from the model's name (like `3B`) when it doesn't. Models with neither show "RAM ?".
 - The internet is only used to fetch the Cookbook list, download models, and talk to any remote MCP servers you add.
 - **On iOS, replies stop when you leave the app.** iOS doesn't let apps use the GPU in the background, and llama.cpp can't keep running on the GPU once iOS takes it away. So the app stops the reply as you leave, marks it as stopped, and reloads the model when you come back. Downloads on iOS do keep going in the background, through the system's own download service.
@@ -155,7 +158,7 @@ It waits for the build to finish, converts the newest `.aab` into a universal AP
 
 | Path | What it is |
 |---|---|
-| `App.js` | Main screen: chat, downloads, model library, history and system prompt |
+| `App.js` | Main screen: chat, downloads, model library and history |
 | `src/components/CookbookMenu.js` | Hardware-aware model catalog from Hugging Face: Recommended, search, filter pills |
 | `src/cookbook/` | Cookbook data: which GGUF file to download, model facts and filters, the Tested models parser |
 | `src/diagnostics/` | Model load failure reports: llama.cpp log capture, crash detection, the GitHub issue |
@@ -172,7 +175,14 @@ It waits for the build to finish, converts the newest `.aab` into a universal AP
 | `src/components/McpPanel.js` | The MCP screen: servers, adding a server, the files folder |
 | `src/components/ToolCallCard.js` | Tool calls and approval prompts in the chat |
 | `src/components/ThinkingBlock.js` | The model's thinking above its reply |
-| `theme.json` | Colours |
+| `src/components/ThemePanel.js` | The Theme screen: built-in and custom themes |
+| `persona.ts` | Built-in personas, copied from Odysseus. Add one here to add it to the app |
+| `src/hooks/usePersona.js`, `src/components/PersonaPanel.js` | The persona in use, saved personas, and the Persona screen |
+| `src/components/LoadingWave.js` | Odysseus' three-bar loading animation, used wherever something loads |
+| `src/components/ResponseTimer.js` | The live reply timer |
+| `src/chat/exportChat.ts` | Export chat: the conversation as a text file for the share sheet |
+| `theme.ts` | Built-in themes, copied from Odysseus. Add one here to add it to the app |
+| `src/theme/` | The theme in use, switching it, and saved custom themes |
 | `app.config.js` | Limits Android builds to `arm64-v8a` and `x86_64` |
 | `.github/workflows/mobile-build.yml` | CI builds and GitHub Releases |
 

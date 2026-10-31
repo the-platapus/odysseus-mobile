@@ -7,6 +7,12 @@ const SESSION_PREFIX = 'ody_session_';
 // Generate a simple unique ID
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 
+// Read any saved conversation without opening it (used by Export chat)
+export async function readSessionLog(id) {
+  const data = await AsyncStorage.getItem(SESSION_PREFIX + id);
+  return data ? JSON.parse(data) : [];
+}
+
 export function useChatStore() {
   const [sessions, setSessions] = useState([]); // List of { id, title, updatedAt }
   const [currentSessionId, setCurrentSessionId] = useState(null);

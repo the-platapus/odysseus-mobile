@@ -1,6 +1,7 @@
 import { Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { useState } from 'react';
-import theme from '../../theme.json';
+import { theme, themed } from '../theme';
+import LoadingWave from './LoadingWave';
 
 const monoFont = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
@@ -14,7 +15,11 @@ export default function ThinkingBlock({ text, live }) {
 
   return (
     <TouchableOpacity activeOpacity={0.7} onPress={() => setExpanded(!expanded)} style={styles.block}>
-      <Text style={styles.header}>{expanded ? '▾' : '▸'} {live ? 'thinking…' : 'thought'}</Text>
+      {live ? (
+        <LoadingWave label={`${expanded ? '▾' : '▸'} thinking`} style={styles.header} />
+      ) : (
+        <Text style={styles.header}>{expanded ? '▾' : '▸'} thought</Text>
+      )}
       {(expanded || live) && (
         <Text style={styles.text} numberOfLines={expanded ? undefined : 2} selectable={expanded}>
           {expanded ? text.trim() : preview}
@@ -24,7 +29,7 @@ export default function ThinkingBlock({ text, live }) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = themed(() => StyleSheet.create({
   block: {
     marginBottom: 8,
     paddingLeft: 8,
@@ -44,4 +49,4 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
   },
-});
+}));

@@ -1,18 +1,23 @@
 // Convert the persisted chat log into OpenAI-style messages for llama.rn's chat templates.
 //
-// Chat log entries (saved by useChatStore):
+// Chat log entries (saved by useChatStore), each with `time` ("12:04 PM") and, from newer
+// versions, `at` (when it was written, in ms):
 //   { role: 'user', text }
-//   { role: 'assistant', text, model?, toolCalls? }   (model: file name of the model that wrote it)
+//   { role: 'assistant', text, model?, persona?, seconds?, reasoning?, toolCalls?, stoppedInBackground? }
+//     (model: file name of the model that wrote it; persona: the named persona it wrote as;
+//      seconds: how long its turn took)
 //   { role: 'tool', id, name, args, output?, status }
 
 import type { ChatMessage, ToolCall } from './agentLoop';
 
 export type ToolEntryStatus = 'approval' | 'running' | 'done' | 'error' | 'denied';
 
+type Written = { time?: string; at?: number };
+
 export type ChatLogEntry =
-  | { role: 'user'; text: string; time?: string }
-  | { role: 'assistant'; text: string; time?: string; model?: string; toolCalls?: ToolCall[] }
-  | { role: 'tool'; id: string; name: string; args: string; output?: string; status: ToolEntryStatus; time?: string };
+  | ({ role: 'user'; text: string } & Written)
+  | ({ role: 'assistant'; text: string; model?: string; persona?: string; seconds?: number; reasoning?: string; toolCalls?: ToolCall[]; stoppedInBackground?: boolean } & Written)
+  | ({ role: 'tool'; id: string; name: string; args: string; output?: string; status: ToolEntryStatus } & Written);
 
 const NOT_EXECUTED = 'This tool call was not executed.';
 

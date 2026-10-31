@@ -11,12 +11,10 @@ export const LOAD_SETTINGS = {
   n_ctx: N_CTX,
   n_gpu_layers: 99, // Force hardware acceleration
 };
-const PLAIN_N_PREDICT = 256; // Cap the response length to save battery/RAM
-const AGENT_N_PREDICT = 1024;
-// Thinking is capped so a slow phone still gets to the answer: past the budget, llama.cpp
-// closes the thinking block with this nudge and the model has to reply.
-const THINKING_BUDGET_TOKENS = 1024;
-const THINKING_BUDGET_MESSAGE = '\n\nI have thought enough; time to answer.\n';
+// No cap on reply or thinking length: a reply ends when the model finishes, at a stop string,
+// or when the context window is full (context shift is off, so it can't run on forever).
+// ■ stops it sooner.
+const N_PREDICT = -1;
 
 /**
  * How the loaded model can call tools:
@@ -54,6 +52,8 @@ const detectThinkingSupport = async (ctx: LlamaContext): Promise<boolean> => {
 export type ChatOptions = {
   /** Let the model think before answering (only for models that support it). */
   thinking?: boolean;
+  /** The persona's sampling temperature; llama.rn's default when unset. */
+  temperature?: number;
 };
 
 export function useLlama() {
@@ -120,7 +120,8 @@ export function useLlama() {
    */
   const generate = useCallback(async (
     prompt: string,
-    onToken?: (token: string) => void
+    onToken?: (token: string) => void,
+    { temperature }: Omit<ChatOptions, 'thinking'> = {}
   ) => {
     if (!contextRef.current) {
       setError('Model not loaded');
@@ -131,12 +132,13 @@ export function useLlama() {
       setIsGenerating(true);
       setError(null);
       // Saved while the reply runs, so the next launch can tell if the app was killed mid-reply.
-      await beginReply(modelPathRef.current, { mode: 'plain', thinking: false, promptChars: prompt.length, maxTokens: PLAIN_N_PREDICT }).catch(() => {});
+      await beginReply(modelPathRef.current, { mode: 'plain', thinking: false, promptChars: prompt.length }).catch(() => {});
 
       const result = await contextRef.current.completion(
         {
           prompt,
-          n_predict: PLAIN_N_PREDICT,
+          n_predict: N_PREDICT,
+          ...(temperature !== undefined ? { temperature } : {}),
           stop: ['User:', '\n\n'], // Simple stop tokens
         },
         (tokenData) => {
@@ -166,26 +168,25 @@ export function useLlama() {
    */
   const chat = useCallback(async (
     { messages, tools, onContent, onReasoning }: CompletionRequest,
-    { thinking = false }: ChatOptions = {}
+    { thinking = false, temperature }: ChatOptions = {}
   ): Promise<CompletionResponse> => {
     const ctx = contextRef.current;
     if (!ctx) throw new Error('Model not loaded');
     setIsGenerating(true);
-    const nPredict = AGENT_N_PREDICT + (thinking ? THINKING_BUDGET_TOKENS : 0);
     const promptChars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
-    await beginReply(modelPathRef.current, { mode: tools ? 'agent' : 'template', thinking, promptChars, maxTokens: nPredict }).catch(() => {});
+    await beginReply(modelPathRef.current, { mode: tools ? 'agent' : 'template', thinking, promptChars }).catch(() => {});
     try {
       const result = await ctx.completion(
         {
           messages,
           jinja: true,
           ...(tools ? { tools, tool_choice: 'auto', parallel_tool_calls: false } : {}),
-          // Off by default: thinking models would spend most of a phone's token budget
-          // reasoning before they act. 'auto' keeps any reasoning out of `content` either way.
+          // Off by default: thinking models would spend a long time reasoning on a phone before
+          // they act. 'auto' keeps any reasoning out of `content` either way.
           enable_thinking: thinking,
           reasoning_format: 'auto',
-          ...(thinking ? { thinking_budget_tokens: THINKING_BUDGET_TOKENS, thinking_budget_message: THINKING_BUDGET_MESSAGE } : {}),
-          n_predict: nPredict,
+          n_predict: N_PREDICT,
+          ...(temperature !== undefined ? { temperature } : {}),
         },
         // Both fields are the parsed text so far, with tool-call and thinking markup removed.
         (data) => {

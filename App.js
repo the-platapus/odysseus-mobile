@@ -6,7 +6,6 @@ import {
   TextInput,
   TouchableOpacity,
   ScrollView,
-  ActivityIndicator,
   Modal,
   Platform,
   KeyboardAvoidingView,
@@ -24,7 +23,10 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Device from 'expo-device';
 import { useLlama, LOAD_SETTINGS } from './src/hooks/useLlama';
-import { useChatStore } from './src/hooks/useChatStore';
+import { useChatStore, readSessionLog } from './src/hooks/useChatStore';
+import { usePersona } from './src/hooks/usePersona';
+import PersonaPanel from './src/components/PersonaPanel';
+import { shareChatExport } from './src/chat/exportChat';
 import { useMcp } from './src/hooks/useMcp';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookbookMenu from './src/components/CookbookMenu';
@@ -32,6 +34,9 @@ import CookbookHint from './src/components/CookbookHint';
 import McpPanel from './src/components/McpPanel';
 import ToolCallCard from './src/components/ToolCallCard';
 import ThinkingBlock from './src/components/ThinkingBlock';
+import ThemePanel from './src/components/ThemePanel';
+import LoadingWave from './src/components/LoadingWave';
+import { ElapsedText, FirstTokenWait } from './src/components/ResponseTimer';
 import { runAgentTurn, buildAgentSystemPrompt, trimHistory } from './src/mcp/agentLoop';
 import { chatLogToMessages } from './src/mcp/chatLog';
 import { setAgentMode } from './src/mcp/runtime';
@@ -41,7 +46,7 @@ import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInte
 import { clearPendingDownload, deleteOrphanPartFiles, loadPendingDownloads, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
 import { displayToolName } from './src/mcp/manager';
 import { addWorkActionListener, dismissFinishedWork, startWork, stopWork, updateWork } from './modules/background-work';
-import theme from './theme.json';
+import { theme, themed, useThemeVersion, isLightColor } from './src/theme';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -100,6 +105,8 @@ const formatTime = (date) => {
 const modelFileName = (uri) => (uri ? decodeURIComponent(uri.split('/').pop()) : '');
 
 export default function App() {
+  // Redraws the whole app when another theme is applied (see src/theme).
+  useThemeVersion();
   const [modelUri, setModelUri] = useState('');
   const [inputText, setInputText] = useState('');
   
@@ -114,6 +121,10 @@ export default function App() {
     deleteSession
   } = useChatStore();
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
+  const [sessionMenuId, setSessionMenuId] = useState(null); // conversation whose long-press menu is open
+  const [isThemeVisible, setIsThemeVisible] = useState(false);
+  const [replyStartedAt, setReplyStartedAt] = useState(null); // while a reply runs, for the live timer
+  const [lastReplySeconds, setLastReplySeconds] = useState(null);
 
   // Downloads in progress, each with its own row in the Models tab: { id, finalUri, phase, progress, status }.
   const [downloads, setDownloads] = useState([]);
@@ -125,9 +136,10 @@ export default function App() {
   const [isCookbookVisible, setIsCookbookVisible] = useState(false);
   const [modalTab, setModalTab] = useState('cookbook');
   const [localModels, setLocalModels] = useState([]);
-  const [systemPrompt, setSystemPrompt] = useState('You are a helpful assistant running natively on a phone.');
+  // The persona sets the system prompt, the temperature and the name on replies (+ → Persona).
+  const personas = usePersona();
   const [isMenuVisible, setIsMenuVisible] = useState(false);
-  const [isSystemPromptModalVisible, setIsSystemPromptModalVisible] = useState(false);
+  const [isPersonaVisible, setIsPersonaVisible] = useState(false);
   const [isMcpVisible, setIsMcpVisible] = useState(false);
   const [isAgentRunning, setIsAgentRunning] = useState(false);
   const [pendingApprovalIds, setPendingApprovalIds] = useState(() => new Set());
@@ -186,7 +198,6 @@ export default function App() {
 
   const menuAnim = useRef(new Animated.Value(0)).current;
   const sidebarAnim = useRef(new Animated.Value(0)).current;
-  const promptModalAnim = useRef(new Animated.Value(0)).current;
 
   const toggleMenu = (show) => {
     const nextVal = typeof show === 'boolean' ? show : !isMenuVisible;
@@ -228,28 +239,26 @@ export default function App() {
       useNativeDriver: true,
     }).start(() => {
       setIsSidebarVisible(false);
+      setSessionMenuId(null);
     });
   };
 
-  const openPromptModal = () => {
-    setIsSystemPromptModalVisible(true);
-    Animated.timing(promptModalAnim, {
-      toValue: 1,
-      duration: 220,
-      easing: dampenedEase,
-      useNativeDriver: true,
-    }).start();
+  // Long-press a conversation in the history sidebar to open its menu; long-press again to close it.
+  const toggleSessionMenu = (id) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setSessionMenuId(prev => (prev === id ? null : id));
   };
 
-  const closePromptModal = () => {
-    Animated.timing(promptModalAnim, {
-      toValue: 0,
-      duration: 160,
-      easing: dampenedEase,
-      useNativeDriver: true,
-    }).start(() => {
-      setIsSystemPromptModalVisible(false);
-    });
+  const exportSession = async (session) => {
+    setSessionMenuId(null);
+    try {
+      // The open conversation is taken from memory: its latest messages may still be saving.
+      const log = session.id === currentSessionId ? chatLog : await readSessionLog(session.id);
+      await shareChatExport(session.title, log);
+    } catch (e) {
+      console.log(`App Alert: Failed to export chat: ${e.message}`);
+      alert(`Failed to export chat: ${e.message}`);
+    }
   };
 
   const changeModalTab = (tab) => {
@@ -778,6 +787,12 @@ export default function App() {
     return () => sub.remove();
   }, []);
 
+  // Who writes a new reply: the model file, and the persona's name when it has one.
+  const replyAuthor = () => ({
+    model: modelFileName(modelUri),
+    ...(personas.displayName ? { persona: personas.displayName } : {}),
+  });
+
   // Agent mode: the agent loop drives llama.rn with the MCP tools and reports each step,
   // which becomes assistant bubbles and tool cards in the chat log. With offerTools false it
   // is a single templated chat turn (used for thinking, which needs the model's template).
@@ -788,17 +803,18 @@ export default function App() {
     stopRequestedRef.current = false;
     setIsAgentRunning(true);
 
-    const system = offerTools ? buildAgentSystemPrompt(systemPrompt, mcp.manager, mcp.disabled) : systemPrompt;
+    const system = offerTools ? buildAgentSystemPrompt(personas.systemPrompt, mcp.manager, mcp.disabled) : personas.systemPrompt;
     const messages = trimHistory(chatLogToMessages([...currentLog, { role: 'user', text: userMsg }], system), AGENT_HISTORY_CHARS);
     const reply = startReplyWork(userMsg);
     let replyText = '';
 
     const onEvent = (event) => {
       if (!isLive()) return;
-      const time = formatTime(new Date());
+      const now = new Date();
+      const time = formatTime(now);
       switch (event.type) {
         case 'round_start':
-          if (event.round > 1) setChatLog(prev => [...prev, { role: 'assistant', text: '', time, model: modelFileName(modelUri) }]);
+          if (event.round > 1) setChatLog(prev => [...prev, { role: 'assistant', text: '', time, at: now.getTime(), ...replyAuthor() }]);
           break;
         case 'content':
           updateLastAssistant({ text: event.text });
@@ -830,6 +846,7 @@ export default function App() {
             args: event.call.rawArgs,
             status: event.needsApproval ? 'approval' : 'running',
             time,
+            at: now.getTime(),
           }]);
           break;
         case 'tool_running':
@@ -846,7 +863,7 @@ export default function App() {
 
     try {
       await runAgentTurn({
-        complete: (request) => chat(request, { thinking }),
+        complete: (request) => chat(request, { thinking, temperature: personas.temperature }),
         manager: mcp.manager,
         messages,
         disabled: mcp.disabled,
@@ -883,8 +900,10 @@ export default function App() {
     // Capture current log before adding new messages to build context
     const currentLog = [...chatLog];
 
-    const timeStr = formatTime(new Date());
-    setChatLog(prev => [...prev, { role: 'user', text: userMsg, time: timeStr }, { role: 'assistant', text: '', time: timeStr, model: modelFileName(modelUri) }]);
+    // `at` gives exports (WhatsApp-style "date, time") the date as well
+    const now = new Date();
+    const timeStr = formatTime(now);
+    setChatLog(prev => [...prev, { role: 'user', text: userMsg, time: timeStr, at: now.getTime() }, { role: 'assistant', text: '', time: timeStr, at: now.getTime(), ...replyAuthor() }]);
 
     // Keep input focused so keyboard stays open without dismissal
     inputRef.current?.focus();
@@ -894,40 +913,48 @@ export default function App() {
       scrollViewRef.current?.scrollToEnd({ animated: true });
     }, 50);
 
-    if (mcp.settings.agentMode && toolSupport !== 'none') {
-      await runAgent(userMsg, currentLog);
-      return;
-    }
-    // Any model with a usable chat template (toolSupport is 'none' only without one) answers through
-    // it, thinking on or off, so the turn takes the agent path without tools. A bare "User: /
-    // Assistant:" transcript makes many models write both sides of the conversation (a Gemma 3 1B
-    // GLM-4.7-Flash fine-tune on an OPPO A53 did), so the plain prompt below is only the fallback.
-    if (toolSupport !== 'none') {
-      await runAgent(userMsg, currentLog, { offerTools: false });
-      return;
-    }
+    // The whole turn is timed: live in the top bar, then on the reply's header ("4.2s").
+    const startedAt = now.getTime();
+    setReplyStartedAt(startedAt);
+    try {
+      if (mcp.settings.agentMode && toolSupport !== 'none') {
+        await runAgent(userMsg, currentLog);
+      } else if (toolSupport !== 'none') {
+        // Any model with a usable chat template (toolSupport is 'none' only without one) answers
+        // through it, thinking on or off, so the turn takes the agent path without tools. A bare
+        // "User: / Assistant:" transcript makes many models write both sides of the conversation
+        // (a Gemma 3 1B GLM-4.7-Flash fine-tune on an OPPO A53 did), so the plain prompt below is
+        // only the fallback.
+        await runAgent(userMsg, currentLog, { offerTools: false });
+      } else {
+        // Build context-aware prompt (tool cards and empty tool-calling turns from agent mode are skipped)
+        let prompt = personas.systemPrompt + "\n\n";
+        currentLog.filter(msg => (msg.role === 'user' || msg.role === 'assistant') && msg.text).forEach(msg => {
+          prompt += (msg.role === 'user' ? 'User: ' : 'Assistant: ') + msg.text + "\n";
+        });
+        prompt += `User: ${userMsg}\nAssistant:`;
 
-    // Build context-aware prompt (tool cards and empty tool-calling turns from agent mode are skipped)
-    let prompt = systemPrompt + "\n\n";
-    currentLog.filter(msg => (msg.role === 'user' || msg.role === 'assistant') && msg.text).forEach(msg => {
-      prompt += (msg.role === 'user' ? 'User: ' : 'Assistant: ') + msg.text + "\n";
-    });
-    prompt += `User: ${userMsg}\nAssistant:`;
-
-    const reply = startReplyWork(userMsg);
-    let replyText = '';
-    await generate(prompt, (token) => {
-      replyText += token;
-      reply.update(replyText);
-      setChatLog(prev => {
-        const newLog = [...prev];
-        const lastIndex = newLog.length - 1;
-        newLog[lastIndex].text += token;
-        return newLog;
-      });
-      scrollViewRef.current?.scrollToEnd({ animated: false });
-    });
-    reply.finish(replyText);
+        const reply = startReplyWork(userMsg);
+        let replyText = '';
+        await generate(prompt, (token) => {
+          replyText += token;
+          reply.update(replyText);
+          setChatLog(prev => {
+            const newLog = [...prev];
+            const lastIndex = newLog.length - 1;
+            newLog[lastIndex].text += token;
+            return newLog;
+          });
+          scrollViewRef.current?.scrollToEnd({ animated: false });
+        }, { temperature: personas.temperature });
+        reply.finish(replyText);
+      }
+    } finally {
+      const seconds = Math.round((Date.now() - startedAt) / 100) / 10;
+      setReplyStartedAt(null);
+      setLastReplySeconds(seconds);
+      updateLastAssistant({ seconds });
+    }
   };
 
   // Every send goes through here so the reply in progress can be awaited (see the iOS reload).
@@ -943,7 +970,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
-        <StatusBar style="light" />
+        <StatusBar style={isLightColor(theme.colors.bg) ? 'dark' : 'light'} />
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
 
           {/* Minimal Top Bar */}
@@ -955,7 +982,15 @@ export default function App() {
               <Text style={styles.appTitle}>odysseus-mobile</Text>
             </View>
             <View style={styles.topBarCenter}>
-              {isReady && <Text style={styles.topBarStats}>ready • 0.0s</Text>}
+              {isReady ? (
+                <Text style={styles.topBarStats}>
+                  {replyStartedAt
+                    ? <>generating • <ElapsedText since={replyStartedAt} /></>
+                    : `ready${lastReplySeconds != null ? ` • ${lastReplySeconds.toFixed(1)}s` : ''}`}
+                </Text>
+              ) : isInitializing && (
+                <LoadingWave label="loading model" size={10} style={styles.topBarStats} />
+              )}
             </View>
             {/* Wrapped so the Cookbook hint can measure where the button is */}
             <View ref={cookbookBtnRef} collapsable={false}>
@@ -1009,21 +1044,48 @@ export default function App() {
                   
                   <ScrollView style={{ flex: 1 }}>
                     {sessions.map(s => (
-                      <View key={s.id} style={{ flexDirection: 'row', padding: 15, borderBottomWidth: 1, borderColor: theme.colors.panel, backgroundColor: currentSessionId === s.id ? theme.colors.panel : 'transparent' }}>
-                        <TouchableOpacity style={{ flex: 1 }} onPress={() => { loadSession(s.id); closeSidebar(); }}>
-                          <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 14, fontWeight: currentSessionId === s.id ? 'bold' : 'normal' }} numberOfLines={1}>{s.title}</Text>
-                          <Text style={{ color: theme.colors.border, fontFamily: monoFont, fontSize: 12, marginTop: 4 }}>{new Date(s.updatedAt).toLocaleDateString()}</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity onPress={() => deleteSession(s.id)} style={{ paddingLeft: 10, justifyContent: 'center' }}>
-                          <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[DEL]</Text>
-                        </TouchableOpacity>
+                      <View key={s.id}>
+                        <View style={{ flexDirection: 'row', padding: 15, borderBottomWidth: 1, borderColor: theme.colors.panel, backgroundColor: currentSessionId === s.id ? theme.colors.panel : 'transparent' }}>
+                          <TouchableOpacity style={{ flex: 1 }} onPress={() => { loadSession(s.id); closeSidebar(); }} onLongPress={() => toggleSessionMenu(s.id)}>
+                            <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 14, fontWeight: currentSessionId === s.id ? 'bold' : 'normal' }} numberOfLines={1}>{s.title}</Text>
+                            <Text style={{ color: theme.colors.border, fontFamily: monoFont, fontSize: 12, marginTop: 4 }}>{new Date(s.updatedAt).toLocaleDateString()}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => deleteSession(s.id)} style={{ paddingLeft: 10, justifyContent: 'center' }}>
+                            <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontSize: 12, fontWeight: 'bold' }}>[DEL]</Text>
+                          </TouchableOpacity>
+                        </View>
+                        {sessionMenuId === s.id && (
+                          <View style={styles.sessionMenu}>
+                            <TouchableOpacity style={styles.dropdownItem} onPress={() => exportSession(s)}>
+                              <Text style={styles.dropdownItemText}>Export chat</Text>
+                            </TouchableOpacity>
+                          </View>
+                        )}
                       </View>
                     ))}
                     {sessions.length === 0 && (
                        <Text style={{ color: theme.colors.border, fontFamily: monoFont, textAlign: 'center', marginTop: 20 }}>No history yet.</Text>
                     )}
                   </ScrollView>
+
+                  {/* Settings live below the conversations, set apart from them */}
+                  <TouchableOpacity style={styles.sidebarFooterItem} onPress={() => setIsThemeVisible(true)}>
+                    <Text style={styles.sidebarFooterText}>Theme</Text>
+                    <Text style={styles.sidebarFooterValue} numberOfLines={1}>{theme.name}</Text>
+                  </TouchableOpacity>
                 </SafeAreaView>
+
+                {/* Opened on top of the sidebar, which is still there when it closes */}
+                <Modal
+                  visible={isThemeVisible}
+                  animationType="slide"
+                  presentationStyle="pageSheet"
+                  onRequestClose={() => setIsThemeVisible(false)}
+                >
+                  <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
+                    <ThemePanel onClose={() => setIsThemeVisible(false)} />
+                  </SafeAreaView>
+                </Modal>
               </Animated.View>
               <TouchableOpacity style={{ flex: 1 }} onPress={closeSidebar} />
             </Animated.View>
@@ -1064,7 +1126,7 @@ export default function App() {
                     disabled={isInitializing || isBusy}
                   >
                     {isInitializing ? (
-                      <ActivityIndicator color={theme.colors.fg} />
+                      <LoadingWave label="Loading model" color={theme.colors.fg} size={14} />
                     ) : (
                       <Text style={styles.modelBtnText}>
                         {isReady ? 'Load Different Model (.gguf)' : 'Pick & Load Model (.gguf)'}
@@ -1074,7 +1136,11 @@ export default function App() {
 
                   {downloads.map(d => (
                     <View key={d.id} style={[styles.downloadContainer, { marginHorizontal: 0, marginTop: 0, marginBottom: 20 }]}>
-                      <Text style={styles.downloadStatus}>{d.status}</Text>
+                      {d.phase === 'paused' ? (
+                        <Text style={styles.downloadStatus}>{d.status}</Text>
+                      ) : (
+                        <LoadingWave label={d.status.replace(/\.\.\.$/, '')} style={styles.downloadStatus} />
+                      )}
                       <View style={styles.progressBarBg}>
                         <View style={[styles.progressBarFill, { width: `${d.progress}%` }]} />
                       </View>
@@ -1166,17 +1232,23 @@ export default function App() {
               // A round that only called tools has no text; its tool cards stand in for it.
               if (msg.role === 'assistant' && !msg.text && !msg.reasoning && msg.toolCalls?.length) return null;
               const isStreaming = isBusy && index === chatLog.length - 1;
-              const body = msg.text || (isStreaming && !msg.reasoning ? "..." : "");
+              // Until its first token, a reply shows Odysseus' "Processing request · 1.2s ▁▂▃".
+              const isWaiting = isStreaming && msg.role === 'assistant' && !msg.text && !msg.reasoning;
+              const body = msg.text;
               return (
                 <View key={index} style={[styles.messageWrapper, msg.role === 'user' ? styles.userWrapper : styles.assistantWrapper]}>
                   <View style={styles.messageHeader}>
                     <Text style={[styles.messageSender, { color: msg.role === 'user' ? theme.colors.fg : '#6bc46d' }]}>
-                      • {msg.role === 'user' ? 'You' : (msg.model || 'Assistant')}
+                      • {msg.role === 'user' ? 'You' : (msg.persona || msg.model || 'Assistant')}
+                      {!!msg.persona && !!msg.model && <Text style={{ color: theme.colors.border, fontWeight: 'normal' }}>  {msg.model}</Text>}
                       {msg.time && <Text style={{ color: theme.colors.border, fontWeight: 'normal' }}>  {msg.time}</Text>}
+                      {msg.seconds != null && <Text style={{ color: theme.colors.border, fontWeight: 'normal' }}> · {msg.seconds.toFixed(1)}s</Text>}
                     </Text>
                   </View>
                   {!!msg.reasoning && <ThinkingBlock text={msg.reasoning} live={isStreaming && !msg.text} />}
-                  {(!!body || !msg.reasoning) && (
+                  {isWaiting ? (
+                    <FirstTokenWait since={msg.at ?? replyStartedAt} />
+                  ) : (!!body || !msg.reasoning) && (
                     <Text style={styles.messageText} selectable={true}>
                       {body}
                     </Text>
@@ -1201,51 +1273,16 @@ export default function App() {
             </SafeAreaView>
           </Modal>
 
-          {/* System Prompt Modal */}
+          {/* Persona Modal */}
           <Modal
-            visible={isSystemPromptModalVisible}
-            animationType="fade"
-            transparent={true}
-            onRequestClose={closePromptModal}
+            visible={isPersonaVisible}
+            animationType="slide"
+            presentationStyle="pageSheet"
+            onRequestClose={() => setIsPersonaVisible(false)}
           >
-            <View style={styles.modalOverlay}>
-              <Animated.View
-                style={[
-                  styles.promptModalContent,
-                  {
-                    opacity: promptModalAnim,
-                    transform: [
-                      {
-                        scale: promptModalAnim.interpolate({
-                          inputRange: [0, 1],
-                          outputRange: [0.93, 1],
-                        }),
-                      },
-                      {
-                        translateY: promptModalAnim.interpolate({
-                          inputRange: [0, 1],
-                          outputRange: [10, 0],
-                        }),
-                      },
-                    ],
-                  },
-                ]}
-              >
-                <Text style={styles.promptModalTitle}>System Prompt</Text>
-                <TextInput
-                  style={styles.promptInput}
-                  value={systemPrompt}
-                  onChangeText={setSystemPrompt}
-                  multiline
-                />
-                <TouchableOpacity
-                  style={styles.promptSaveBtn}
-                  onPress={closePromptModal}
-                >
-                  <Text style={styles.promptSaveBtnText}>Save</Text>
-                </TouchableOpacity>
-              </Animated.View>
-            </View>
+            <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
+              <PersonaPanel personas={personas} onClose={() => setIsPersonaVisible(false)} />
+            </SafeAreaView>
           </Modal>
 
           {/* Backdrop when dropdown menu is visible */}
@@ -1288,11 +1325,11 @@ export default function App() {
                 <TouchableOpacity
                   onPress={() => {
                     toggleMenu(false);
-                    openPromptModal();
+                    setIsPersonaVisible(true);
                   }}
                   style={styles.dropdownItem}
                 >
-                  <Text style={styles.dropdownItemText}>System Prompt</Text>
+                  <Text style={styles.dropdownItemText}>Persona</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={() => {
@@ -1387,7 +1424,7 @@ export default function App() {
 
 const monoFont = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
-const styles = StyleSheet.create({
+const styles = themed(() => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: theme.colors.bg,
@@ -1627,6 +1664,39 @@ const styles = StyleSheet.create({
     zIndex: 101,
     elevation: 5,
   },
+  sidebarFooterItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    borderTopWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  sidebarFooterText: {
+    color: theme.colors.fg,
+    fontFamily: monoFont,
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  sidebarFooterValue: {
+    flexShrink: 1,
+    marginLeft: 12,
+    color: theme.colors.border,
+    fontFamily: monoFont,
+    fontSize: 12,
+  },
+  // A conversation's long-press menu in the history sidebar: the dropdown's look, under the row.
+  sessionMenu: {
+    backgroundColor: theme.colors.panel,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: 8,
+    padding: 8,
+    marginHorizontal: 15,
+    marginVertical: 8,
+    alignSelf: 'flex-start',
+    minWidth: 150,
+  },
   dropdownItem: {
     paddingVertical: 8,
     paddingHorizontal: 12,
@@ -1635,52 +1705,6 @@ const styles = StyleSheet.create({
     color: theme.colors.fg,
     fontFamily: monoFont,
     fontSize: 14,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  promptModalContent: {
-    width: '80%',
-    backgroundColor: theme.colors.panel,
-    borderRadius: 12,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-  },
-  promptModalTitle: {
-    color: theme.colors.fg,
-    fontFamily: monoFont,
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 15,
-  },
-  promptInput: {
-    backgroundColor: theme.colors.bg,
-    color: theme.colors.fg,
-    borderRadius: 8,
-    padding: 12,
-    minHeight: 100,
-    fontFamily: monoFont,
-    textAlignVertical: 'top',
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    marginBottom: 15,
-  },
-  promptSaveBtn: {
-    backgroundColor: theme.colors.bg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    borderRadius: 8,
-    padding: 12,
-    alignItems: 'center',
-  },
-  promptSaveBtnText: {
-    color: theme.colors.red,
-    fontFamily: monoFont,
-    fontWeight: 'bold',
   },
   modelPill: {
     flexDirection: 'row',
@@ -1704,4 +1728,4 @@ const styles = StyleSheet.create({
     fontFamily: monoFont,
     fontSize: 10,
   }
-});
+}));
