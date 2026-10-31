@@ -38,7 +38,7 @@ import { setAgentMode } from './src/mcp/runtime';
 import { COMFORTABLE_RAM_SHARE, pickGgufFile } from './src/cookbook/ggufPicker';
 import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
 import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad, takeInterruptedReply } from './src/diagnostics/loadDiagnostics';
-import { clearPendingDownload, loadPendingDownloads, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
+import { clearPendingDownload, deleteOrphanPartFiles, loadPendingDownloads, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
 import { displayToolName } from './src/mcp/manager';
 import { addWorkActionListener, dismissFinishedWork, startWork, stopWork, updateWork } from './modules/background-work';
 import theme from './theme.json';
@@ -501,6 +501,7 @@ export default function App() {
       }));
       setLocalModels(fileDetails);
       setPendingDownloads(await loadPendingDownloads(isDownloadActive));
+      await deleteOrphanPartFiles(FileSystem.documentDirectory, files, isDownloadActive);
     } catch (e) {
       console.log(`App Alert: Failed to scan local models: ${e.message}`);
       alert(`Failed to scan local models: ${e.message}`);

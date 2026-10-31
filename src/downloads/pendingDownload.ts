@@ -86,6 +86,22 @@ export async function loadPendingDownloads(
 }
 
 /**
+ * Delete the "<name>.gguf.part" files among `fileNames` (the contents of `dir`) that no download
+ * record points to. Nothing can resume them, so they'd only take up space. Downloads that
+ * `isActive` says are running are left alone.
+ */
+export async function deleteOrphanPartFiles(dir: string, fileNames: string[], isActive: (finalUri: string) => boolean) {
+  const keys = await AsyncStorage.getAllKeys();
+  const recorded = new Set(keys.filter(key => key.startsWith(PENDING_DOWNLOAD_PREFIX)).map(key => key.slice(PENDING_DOWNLOAD_PREFIX.length)));
+  for (const name of fileNames) {
+    if (!name.toLowerCase().endsWith('.gguf.part')) continue;
+    const finalUri = dir + name.slice(0, -'.part'.length);
+    if (recorded.has(finalUri) || isActive(finalUri)) continue;
+    await FileSystem.deleteAsync(dir + name, { idempotent: true });
+  }
+}
+
+/**
  * The `resumeData` to continue from the bytes already on disk, or undefined to start over.
  * Android's downloader takes a byte count and asks the server for the rest (an HTTP Range
  * request). iOS resume data is an opaque blob from its download session that only exists
