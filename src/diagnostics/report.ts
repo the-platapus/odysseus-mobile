@@ -5,6 +5,9 @@
 // unknown architecture, running out of memory, a truncated file), so the report carries the
 // log lines captured during the load, plus the GGUF metadata and the device.
 
+import { ggufFacts } from '../engines/ggufHeader';
+import { whyUnsupported } from '../engines/support';
+
 /** How far a reply got before the app closed, from its last save (every couple of seconds). */
 export type ReplyProgress = {
   /** 'plain': the bare User:/Assistant: prompt. 'template': the model's chat template. 'agent': the template with tools. */
@@ -57,20 +60,22 @@ export function diagnose(f: LoadFailure): string | null {
     const when = f.reply.tokens ? 'while answering' : 'while reading the prompt, before it wrote anything';
     return `The app closed ${when}. That usually means the phone ran out of memory: phones close apps that use too much without warning. Try a smaller model or a smaller quantization.`;
   }
-  const meta = f.metadata ?? {};
-  const arch = log.match(/unknown model architecture: '([^']+)'/);
-  if (arch) return `This model's architecture (${arch[1]}) isn't supported by this app's llama.cpp version yet.`;
-  if (meta['general.type'] === 'mmproj' || meta['general.architecture'] === 'clip') {
-    return 'This file is a vision projector (mmproj), not a model. Download the model file from the same repo instead.';
-  }
-  const parts = Number(meta['split.count'] ?? 0);
-  if (parts > 1) return `This file is one part of a model split into ${parts} files, which the app can't load yet.`;
+  // The same reasons the download checks, in the same words. The log names the architecture
+  // even when the metadata couldn't be read.
+  const facts = ggufFacts(f.metadata);
+  const arch = log.match(/(?:unknown|unsupported) model architecture: '([^']+)'/);
+  if (arch) facts.architecture = arch[1];
+  const problem = whyUnsupported(facts);
+  if (problem) return problem.reason;
   const expected = f.source?.expectedSize;
   if (expected && f.fileSize !== null && f.fileSize < expected) {
     return `The file is incomplete (${gb(f.fileSize)} of ${gb(expected)}). Delete it and download it again.`;
   }
   if (/failed to (allocate|create context)|out of memory|cannot allocate|unable to allocate|insufficient memory|ErrorOutOfDeviceMemory/i.test(log)) {
     return 'The phone ran out of memory loading this model. Try a smaller model or a smaller quantization.';
+  }
+  if (/invalid ggml type/i.test(log)) {
+    return "The file uses a quantization type this app's llama.cpp doesn't know (often a newer one). Try another quantization of the model.";
   }
   if (/invalid magic|failed to read magic|not a gguf|tensor data is not within the file bounds|unexpected end of file|failed to read/i.test(log)) {
     return 'The file looks damaged or incomplete. Delete it and download it again.';

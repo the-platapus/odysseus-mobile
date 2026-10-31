@@ -79,8 +79,8 @@ Where everything else lives:
 - **[MODELS]** (in the Cookbook) lists your downloaded models and has **Pick & Load Model (.gguf)** for importing your own file.
 - **☰** (top left) opens your chat history and **+ New Conversation**. Long-press a conversation for **Export chat**. **Theme**, at the bottom, opens the Theme screen.
 - **+** (next to the message box) opens the menu with **Persona** and **MCP**.
-- **agent: off** (above the message box, right) switches agent mode on and off. Long-press it to open **MCP**.
-- **think: off** (next to it) switches thinking on and off. It only appears when the loaded model can think. The setting is remembered across models.
+- **agent: on** (above the message box, right) switches agent mode on and off. It starts on. Long-press it to open **MCP**.
+- **think: on** (next to it) switches thinking on and off. It starts on, and only appears when the loaded model can think. The setting is remembered across models.
 
 ## Agent mode and MCP tools
 

@@ -19,7 +19,8 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#1b1c1d"
       },
-      "package": "com.the_platapus1325.odysseusmobile"
+      "package": "com.the_platapus1325.odysseusmobile",
+      "permissions": ["android.permission.REQUEST_INSTALL_PACKAGES"]
     },
     "web": {
       "favicon": "./assets/favicon.png"

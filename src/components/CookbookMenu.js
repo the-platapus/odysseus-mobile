@@ -13,6 +13,8 @@ import {
   matchesFilters,
   matchesQuery,
   parseRecommended,
+  runsHere,
+  whyCantRun,
 } from '../cookbook/catalog';
 import { README_RAW_URL } from '../repo';
 import { theme, themed } from '../theme';
@@ -52,7 +54,10 @@ function Chip({ label, count, active, onPress }) {
 }
 
 function ModelCard({ model, color, phoneRamGb, onPress }) {
-  const isUnsupported = !fitsPhone(model, phoneRamGb);
+  const tooBig = !fitsPhone(model, phoneRamGb);
+  // Flagged before anyone downloads it: the download would only fail to load.
+  const problem = whyCantRun(model);
+  const isUnsupported = tooBig || !!problem;
   const facts = [
     model.paramsB ? `${model.paramsB}B` : null,
     model.architecture,
@@ -80,7 +85,9 @@ function ModelCard({ model, color, phoneRamGb, onPress }) {
         </Text>
       </View>
       <Text style={styles.cardQuant} numberOfLines={1}>
-        {isUnsupported ? `Requires ${model.ramGb}GB RAM` : model.id}
+        {problem
+          ? problem.label.charAt(0).toUpperCase() + problem.label.slice(1)
+          : tooBig ? `Requires ${model.ramGb}GB RAM` : model.id}
       </Text>
       {facts.length > 0 && <Text style={styles.cardDesc} numberOfLines={1}>{facts.join(' · ')}</Text>}
       {(model.recommended || model.features.length > 0) && (
@@ -166,11 +173,11 @@ export default function CookbookMenu({ onSelectModel }) {
   const listShown = base
     .filter((m) => !recommendedIds.has(m.id) && matchesFilters(m, filters, totalRamGB))
     .map((m, index) => ({ m, index }))
-    // Models that fit come first. The trending list then goes smallest first (the old order);
-    // search results keep Hugging Face's ranking.
+    // Models that can run here come first. The trending list then goes smallest first (the old
+    // order); search results keep Hugging Face's ranking.
     .sort((a, b) => {
-      const af = fitsPhone(a.m, totalRamGB);
-      const bf = fitsPhone(b.m, totalRamGB);
+      const af = runsHere(a.m, totalRamGB);
+      const bf = runsHere(b.m, totalRamGB);
       if (af !== bf) return af ? -1 : 1;
       return searchActive ? a.index - b.index : (a.m.ramGb ?? 99) - (b.m.ramGb ?? 99);
     })

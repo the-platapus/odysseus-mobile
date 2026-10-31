@@ -109,6 +109,9 @@ export function pickGgufFile(tree: HfTreeEntry[], preferred?: string, maxBytes?:
     const entry = files.find((e) => e.path === preferred || basename(e.path) === preferred);
     if (!entry) return { ok: false, error: `The file ${preferred} is no longer in this repo.` };
     const size = sizeOf(entry);
+    // A split model's part count is too far into the file for the header check to see.
+    const reason = unloadableReason(entry.path, size);
+    if (reason) return { ok: false, error: `${basename(entry.path)} is ${reason}, so the app can't load it.` };
     return { ok: true, file: { path: entry.path, size, quant: quantOf(entry.path).quant }, fits: fitsIn(size) };
   }
 

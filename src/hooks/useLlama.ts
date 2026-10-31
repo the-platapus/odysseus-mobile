@@ -62,6 +62,8 @@ export function useLlama() {
   const [error, setError] = useState<string | null>(null);
   const [toolSupport, setToolSupport] = useState<ToolSupport>('none');
   const [supportsThinking, setSupportsThinking] = useState(false);
+  // The model file in RAM right now, or null when none is loaded.
+  const [loadedModelPath, setLoadedModelPath] = useState<string | null>(null);
 
   // Keep track of the active context
   const contextRef = useRef<LlamaContext | null>(null);
@@ -82,6 +84,7 @@ export function useLlama() {
       if (contextRef.current) {
         await contextRef.current.release();
         contextRef.current = null;
+        setLoadedModelPath(null);
         setToolSupport('none');
         setSupportsThinking(false);
       }
@@ -102,6 +105,7 @@ export function useLlama() {
 
       contextRef.current = ctx;
       modelPathRef.current = modelPath;
+      setLoadedModelPath(modelPath);
       setToolSupport(detectToolSupport(ctx));
       setSupportsThinking(await detectThinkingSupport(ctx));
       return null;
@@ -181,8 +185,8 @@ export function useLlama() {
           messages,
           jinja: true,
           ...(tools ? { tools, tool_choice: 'auto', parallel_tool_calls: false } : {}),
-          // Off by default: thinking models would spend a long time reasoning on a phone before
-          // they act. 'auto' keeps any reasoning out of `content` either way.
+          // The app's think switch (on by default). 'auto' keeps any reasoning out of `content`
+          // either way.
           enable_thinking: thinking,
           reasoning_format: 'auto',
           n_predict: N_PREDICT,
@@ -220,10 +224,16 @@ export function useLlama() {
       await contextRef.current.release();
       contextRef.current = null;
     }
+    // State, not just the ref, so whoever shows the model re-renders.
+    setLoadedModelPath(null);
+    setToolSupport('none');
+    setSupportsThinking(false);
   }, []);
 
   return {
-    isReady: !!contextRef.current,
+    // Set and cleared together with contextRef, but as state, so it's current while rendering.
+    isReady: loadedModelPath !== null,
+    loadedModelPath,
     isInitializing,
     isGenerating,
     error,

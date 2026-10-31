@@ -31,9 +31,11 @@ import { useMcp } from './src/hooks/useMcp';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookbookMenu from './src/components/CookbookMenu';
 import CookbookHint from './src/components/CookbookHint';
+import UpdatePrompt from './src/components/UpdatePrompt';
 import McpPanel from './src/components/McpPanel';
 import ToolCallCard from './src/components/ToolCallCard';
 import ThinkingBlock from './src/components/ThinkingBlock';
+import MarkdownText from './src/components/MarkdownText';
 import ThemePanel from './src/components/ThemePanel';
 import LoadingWave from './src/components/LoadingWave';
 import { ElapsedText, FirstTokenWait } from './src/components/ResponseTimer';
@@ -42,6 +44,9 @@ import { chatLogToMessages } from './src/mcp/chatLog';
 import { setAgentMode } from './src/mcp/runtime';
 import { COMFORTABLE_RAM_SHARE, pickGgufFile } from './src/cookbook/ggufPicker';
 import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
+import { fetchGgufMetadata, ggufFacts } from './src/engines/ggufHeader';
+import { whyUnsupported } from './src/engines/support';
+import { fetch as streamingFetch } from 'expo/fetch';
 import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad, takeInterruptedReply } from './src/diagnostics/loadDiagnostics';
 import { clearPendingDownload, deleteOrphanPartFiles, loadPendingDownloads, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
 import { displayToolName } from './src/mcp/manager';
@@ -144,9 +149,10 @@ export default function App() {
   const [isAgentRunning, setIsAgentRunning] = useState(false);
   const [pendingApprovalIds, setPendingApprovalIds] = useState(() => new Set());
 
-  const [isThinkingOn, setIsThinkingOn] = useState(false);
+  // On unless switched off: models that can't think ignore it.
+  const [isThinkingOn, setIsThinkingOn] = useState(true);
 
-  const { isReady, isInitializing, isGenerating, error, toolSupport, supportsThinking, loadModel, generate, chat, stop, releaseModel } = useLlama();
+  const { isReady, loadedModelPath, isInitializing, isGenerating, error, toolSupport, supportsThinking, loadModel, generate, chat, stop, releaseModel } = useLlama();
   const mcp = useMcp();
   const isBusy = isGenerating || isAgentRunning;
   // The switch is remembered for every model; it only applies to models that can think.
@@ -299,7 +305,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    AsyncStorage.getItem('thinking_mode').then(value => setIsThinkingOn(value === 'on')).catch(() => {});
+    AsyncStorage.getItem('thinking_mode').then(value => setIsThinkingOn(value !== 'off')).catch(() => {});
   }, []);
 
   const toggleThinking = () => {
@@ -527,6 +533,18 @@ export default function App() {
     }
   };
 
+  // Free the model's RAM. Only an unloaded model can be deleted, so this comes first.
+  const unloadModel = async () => {
+    try {
+      await releaseModel();
+      setModelUri('');
+      await AsyncStorage.removeItem('last_model_uri');
+    } catch (e) {
+      console.log(`App Alert: Failed to unload model: ${e.message}`);
+      alert(`Failed to unload model: ${e.message}`);
+    }
+  };
+
   const pickModel = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -610,14 +628,24 @@ export default function App() {
       const pick = pickGgufFile(tree, model.file, maxBytes, comfortableBytes);
       if (!pick.ok) throw new Error(pick.error);
       const file = pick.file;
+      const downloadUrl = `https://huggingface.co/${model.id}/resolve/main/${file.path.split('/').map(encodeURIComponent).join('/')}`;
+      const fileName = file.path.split('/').pop();
+
+      // Read the file's header (its first 64 KB) first: a model no engine here can run would
+      // otherwise only fail after the whole download. If the header can't be read, go ahead.
+      patchDownload(id, { status: `Checking ${fileName}...` });
+      const problem = whyUnsupported(ggufFacts(await fetchGgufMetadata(downloadUrl, streamingFetch)));
+      if (problem) {
+        removeDownload(id);
+        Alert.alert(`Can't run ${model.name}`, `${problem.reason}\n\nNothing was downloaded.`);
+        return;
+      }
       if (!pick.fits && !(await confirmLargeDownload(file))) {
         removeDownload(id);
         return;
       }
 
       const expectedSize = file.size;
-      const downloadUrl = `https://huggingface.co/${model.id}/resolve/main/${file.path.split('/').map(encodeURIComponent).join('/')}`;
-      const fileName = file.path.split('/').pop();
       const finalUri = FileSystem.documentDirectory + fileName;
       const partUri = partUriFor(finalUri);
       // Two downloads of the same file would write into the same .part file.
@@ -1186,17 +1214,31 @@ export default function App() {
                   {localModels.length === 0 && !isDownloading && interruptedDownloads.length === 0 ? (
                     <Text style={{ color: theme.colors.border, fontFamily: monoFont, textAlign: 'center', marginTop: 20 }}>No models downloaded yet.</Text>
                   ) : (
-                    localModels.map((m, i) => (
-                      <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, backgroundColor: theme.colors.panel, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: theme.colors.border }}>
-                        <TouchableOpacity style={{ flex: 1 }} onPress={() => { setIsCookbookVisible(false); handleLoadModel(m.uri); }}>
-                          <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 14 }} numberOfLines={1}>{m.name}</Text>
-                          <Text style={{ color: theme.colors.border, fontFamily: monoFont, fontSize: 12, marginTop: 4 }}>{(m.size / 1e9).toFixed(2)} GB</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity onPress={() => deleteLocalModel(m.uri)} style={{ padding: 8 }}>
-                          <Text style={{ color: theme.colors.red, fontFamily: monoFont, fontWeight: 'bold' }}>[DEL]</Text>
-                        </TouchableOpacity>
-                      </View>
-                    ))
+                    localModels.map((m, i) => {
+                      const loaded = loadedModelPath === m.uri;
+                      // A file that's being loaded can't be deleted either.
+                      const loading = isInitializing && modelUri === m.uri;
+                      return (
+                        <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, backgroundColor: theme.colors.panel, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: loaded ? theme.colors.fg : theme.colors.border }}>
+                          <TouchableOpacity style={{ flex: 1 }} onPress={() => { setIsCookbookVisible(false); if (!loaded) handleLoadModel(m.uri); }}>
+                            <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 14 }} numberOfLines={1}>{m.name}</Text>
+                            <Text style={{ color: theme.colors.border, fontFamily: monoFont, fontSize: 12, marginTop: 4 }}>
+                              {(m.size / 1e9).toFixed(2)} GB
+                              {(loaded || loading) && <Text style={{ color: theme.colors.fg }}>{loaded ? '  · loaded' : '  · loading'}</Text>}
+                            </Text>
+                          </TouchableOpacity>
+                          {loaded ? (
+                            <TouchableOpacity onPress={unloadModel} disabled={isBusy} style={{ padding: 8 }}>
+                              <Text style={{ color: isBusy ? theme.colors.border : theme.colors.fg, fontFamily: monoFont, fontWeight: 'bold' }}>[UNLOAD]</Text>
+                            </TouchableOpacity>
+                          ) : (
+                            <TouchableOpacity onPress={() => deleteLocalModel(m.uri)} disabled={loading} style={{ padding: 8 }}>
+                              <Text style={{ color: loading ? theme.colors.border : theme.colors.red, fontFamily: monoFont, fontWeight: 'bold' }}>[DEL]</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      );
+                    })
                   )}
                 </ScrollView>
               )}
@@ -1248,11 +1290,13 @@ export default function App() {
                   {!!msg.reasoning && <ThinkingBlock text={msg.reasoning} live={isStreaming && !msg.text} />}
                   {isWaiting ? (
                     <FirstTokenWait since={msg.at ?? replyStartedAt} />
-                  ) : (!!body || !msg.reasoning) && (
+                  ) : (!!body || !msg.reasoning) && (msg.role === 'assistant' ? (
+                    <MarkdownText text={body} style={styles.messageText} />
+                  ) : (
                     <Text style={styles.messageText} selectable={true}>
                       {body}
                     </Text>
-                  )}
+                  ))}
                   {msg.stoppedInBackground && (
                     <Text style={styles.stoppedNote}>{"Stopped when the app left the screen: iOS doesn't let apps use the GPU in the background."}</Text>
                   )}
@@ -1417,6 +1461,7 @@ export default function App() {
           </View>
         </KeyboardAvoidingView>
         <CookbookHint ref={cookbookHintRef} targetRef={cookbookBtnRef} />
+        <UpdatePrompt />
       </SafeAreaView>
     </SafeAreaProvider>
   );

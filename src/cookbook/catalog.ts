@@ -2,6 +2,8 @@
 // "Recommended" list parsed from the repo README. No React Native imports, so it can be tested
 // outside the app.
 
+import { whyRepoUnsupported } from '../engines/support';
+
 export type Feature = 'thinking' | 'tools' | 'moe';
 
 export type CatalogModel = {
@@ -144,6 +146,12 @@ export const NO_FILTERS: Filters = { fitsPhone: false, size: null, feature: null
 export const fitsPhone = (m: CatalogModel, phoneRamGb: number | null) =>
   phoneRamGb === null || m.ramGb === null || m.ramGb <= phoneRamGb;
 
+/** Why no engine in the app can run this repo's models, judged by the architecture Hugging Face reports. */
+export const whyCantRun = (m: CatalogModel) => whyRepoUnsupported('gguf', m.architecture);
+
+/** Fits the phone's RAM and an engine can run it. */
+export const runsHere = (m: CatalogModel, phoneRamGb: number | null) => fitsPhone(m, phoneRamGb) && !whyCantRun(m);
+
 const inBucket = (m: CatalogModel, key: string) => {
   const bucket = SIZE_BUCKETS.find((b) => b.key === key);
   // min is exclusive except for the first bucket, so 2B is "≤2B" and 4B is "2–4B".
@@ -151,7 +159,7 @@ const inBucket = (m: CatalogModel, key: string) => {
 };
 
 export function matchesFilters(m: CatalogModel, f: Filters, phoneRamGb: number | null): boolean {
-  if (f.fitsPhone && !fitsPhone(m, phoneRamGb)) return false;
+  if (f.fitsPhone && !runsHere(m, phoneRamGb)) return false;
   if (f.size && !inBucket(m, f.size)) return false;
   if (f.feature && !m.features.includes(f.feature)) return false;
   if (f.family && m.family !== f.family) return false;
@@ -170,7 +178,7 @@ export function chipCounts(models: CatalogModel[], phoneRamGb: number | null) {
   for (const m of models) if (m.family) families.set(m.family, (families.get(m.family) ?? 0) + 1);
   return {
     all: models.length,
-    fitsPhone: models.filter((m) => fitsPhone(m, phoneRamGb)).length,
+    fitsPhone: models.filter((m) => runsHere(m, phoneRamGb)).length,
     sizes: Object.fromEntries(SIZE_BUCKETS.map((b) => [b.key, models.filter((m) => inBucket(m, b.key)).length])),
     features: Object.fromEntries(FEATURES.map((f) => [f.key, models.filter((m) => m.features.includes(f.key)).length])),
     families: [...families].sort((a, b) => b[1] - a[1]).slice(0, 10),

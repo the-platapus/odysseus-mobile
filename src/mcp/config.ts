@@ -31,7 +31,7 @@ export const BUILTIN_SERVERS: McpServerConfig[] = [
 
 export const DEFAULT_SETTINGS: McpSettings = {
   version: 1,
-  agentMode: false,
+  agentMode: true,
   servers: BUILTIN_SERVERS,
   fsRootUri: null,
 };
@@ -49,7 +49,9 @@ export function normalizeSettings(stored: Partial<McpSettings> | null | undefine
     .map((s) => ({ ...s, enabled: s.enabled !== false, disabledTools: s.disabledTools ?? [] }));
   return {
     version: 1,
-    agentMode: stored?.agentMode === true,
+    // On unless saved as off. Settings saved before this default changed carry `false` even if
+    // the switch was never touched, so those phones stay off until it's switched on.
+    agentMode: stored?.agentMode !== false,
     servers: [...builtins, ...remote],
     fsRootUri: typeof stored?.fsRootUri === 'string' ? stored.fsRootUri : null,
   };
