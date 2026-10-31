@@ -56,7 +56,7 @@ Example row:
 |---|---|---|---|---|
 | MiniCPM5 2B | `openbmb/MiniCPM5-2B-GGUF` | `MiniCPM5-2B-Q4_K_M.gguf` | thinking, tools | iPhone 13 (4 GB), iOS 18.6.2 |
 | Qwen3 0.6B | `Qwen/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q8_0.gguf` | thinking, tools | iPhone 13 (4 GB), iOS 18.6.2 |
-| Gemma 3 1B GLM-4.7-Flash Heretic Thinking | `Andycurrent/Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_GGUF` | `Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf` |  | Waydroid (x86_64) |
+| Gemma 3 1B GLM-4.7-Flash Heretic Thinking | `Andycurrent/Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_GGUF` | `Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf` |  | Waydroid (x86_64), OPPO A53 (4 GB) |
 
 ## Install
 
@@ -76,13 +76,13 @@ Where everything else lives:
 
 - **[MODELS]** (in the Cookbook) lists your downloaded models and has **Pick & Load Model (.gguf)** for importing your own file.
 - **☰** (top left) opens your chat history and **+ New Conversation**.
-- **+** (next to the message box) opens the menu with **System Prompt** and **Tools (MCP)**.
-- **agent: off** (above the message box, right) switches agent mode on and off. Long-press it to open **Tools (MCP)**.
+- **+** (next to the message box) opens the menu with **System Prompt** and **MCP**.
+- **agent: off** (above the message box, right) switches agent mode on and off. Long-press it to open **MCP**.
 - **think: off** (next to it) switches thinking on and off. It only appears when the loaded model can think. The setting is remembered across models.
 
 ## Agent mode and MCP tools
 
-The tool layer follows the MCP design of the Odysseus desktop app. Each MCP server's tools are offered to the model as `mcp__<server>__<tool>`. A tool that only reads runs straight away. One that changes something shows **[ALLOW]**, **[ALLOW IN CHAT]** and **[DENY]** in the chat first. You can switch each server and each tool on or off under **Tools (MCP)**.
+The tool layer follows the MCP design of the Odysseus desktop app. Each MCP server's tools are offered to the model as `mcp__<server>__<tool>`. A tool that only reads runs straight away. One that changes something shows **[ALLOW]**, **[ALLOW IN CHAT]** and **[DENY]** in the chat first. You can switch each server and each tool on or off under **MCP**.
 
 | Server | Tools |
 |---|---|
@@ -97,8 +97,8 @@ The tool layer follows the MCP design of the Odysseus desktop app. Each MCP serv
 
 ## Good to know
 
-- The context window is 4,096 tokens. In normal chat, each reply is capped at 256 tokens and ends at the first blank line, so long answers get cut short.
-- Normal chat prompts use a plain `User:` / `Assistant:` format instead of each model's own chat template, so some models answer better than others. Agent mode and thinking mode use the model's own chat template, and replies can run to 1,024 tokens.
+- The context window is 4,096 tokens. Chats use the model's own chat template, and replies can run to 1,024 tokens.
+- Models without a usable chat template fall back to a plain `User:` / `Assistant:` transcript. There, each reply is capped at 256 tokens and ends at the first blank line, and the model may start writing both sides of the conversation.
 - Thinking is capped at 1,024 tokens. After that the model is told to stop thinking and answer. The thinking is shown but not sent back to the model in later turns, to save context.
 - RAM estimates come from the parameter count Hugging Face reports for the GGUF, or from the model's name (like `3B`) when it doesn't. Models with neither show "RAM ?".
 - The internet is only used to fetch the Cookbook list, download models, and talk to any remote MCP servers you add.
@@ -169,7 +169,7 @@ It waits for the build to finish, converts the newest `.aab` into a universal AP
 | `src/mcp/` | The MCP framework: protocol, server, client, transports, `McpManager`, agent loop |
 | `src/mcp/builtin/` | Built-in MCP servers (files, memory) |
 | `src/mcp/expoAdapters.ts`, `src/mcp/runtime.ts` | Device storage and file access for MCP, plus the app-wide manager and its settings |
-| `src/components/McpPanel.js` | The Tools (MCP) screen: servers, adding a server, the files folder |
+| `src/components/McpPanel.js` | The MCP screen: servers, adding a server, the files folder |
 | `src/components/ToolCallCard.js` | Tool calls and approval prompts in the chat |
 | `src/components/ThinkingBlock.js` | The model's thinking above its reply |
 | `theme.json` | Colours |

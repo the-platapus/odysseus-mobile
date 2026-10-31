@@ -2,7 +2,7 @@
 //
 // Chat log entries (saved by useChatStore):
 //   { role: 'user', text }
-//   { role: 'assistant', text, toolCalls? }
+//   { role: 'assistant', text, model?, toolCalls? }   (model: file name of the model that wrote it)
 //   { role: 'tool', id, name, args, output?, status }
 
 import type { ChatMessage, ToolCall } from './agentLoop';
@@ -11,7 +11,7 @@ export type ToolEntryStatus = 'approval' | 'running' | 'done' | 'error' | 'denie
 
 export type ChatLogEntry =
   | { role: 'user'; text: string; time?: string }
-  | { role: 'assistant'; text: string; time?: string; toolCalls?: ToolCall[] }
+  | { role: 'assistant'; text: string; time?: string; model?: string; toolCalls?: ToolCall[] }
   | { role: 'tool'; id: string; name: string; args: string; output?: string; status: ToolEntryStatus; time?: string };
 
 const NOT_EXECUTED = 'This tool call was not executed.';

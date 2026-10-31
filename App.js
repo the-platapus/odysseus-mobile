@@ -37,7 +37,7 @@ import { chatLogToMessages } from './src/mcp/chatLog';
 import { setAgentMode } from './src/mcp/runtime';
 import { COMFORTABLE_RAM_SHARE, pickGgufFile } from './src/cookbook/ggufPicker';
 import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
-import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad } from './src/diagnostics/loadDiagnostics';
+import { collectLoadFailure, offerLoadFailureReport, recordModelSource, takeInterruptedLoad, takeInterruptedReply } from './src/diagnostics/loadDiagnostics';
 import { clearPendingDownload, loadPendingDownloads, partUriFor, resumeDataFor, savePendingDownload } from './src/downloads/pendingDownload';
 import { displayToolName } from './src/mcp/manager';
 import { addWorkActionListener, dismissFinishedWork, startWork, stopWork, updateWork } from './modules/background-work';
@@ -94,6 +94,10 @@ const formatTime = (date) => {
   m = m < 10 ? '0' + m : m;
   return `${h}:${m} ${ampm}`;
 };
+
+// The model's file name, e.g. "Qwen3-4B-Q4_K_M.gguf". Each assistant message stores the one
+// that wrote it, so its sender doesn't change when a different model is loaded later.
+const modelFileName = (uri) => (uri ? decodeURIComponent(uri.split('/').pop()) : '');
 
 export default function App() {
   const [modelUri, setModelUri] = useState('');
@@ -311,6 +315,18 @@ export default function App() {
           settings: LOAD_SETTINGS,
         }));
         return;
+      }
+      // The app closed mid-reply (usually the phone ran out of memory; iOS keeps no crash log
+      // for that). The model itself loaded fine, so it's still loaded again below.
+      const interruptedReply = await takeInterruptedReply();
+      if (interruptedReply) {
+        offerLoadFailureReport(await collectLoadFailure({
+          kind: 'crash',
+          uri: interruptedReply.uri,
+          log: interruptedReply.log,
+          settings: LOAD_SETTINGS,
+          reply: interruptedReply.reply,
+        }));
       }
       const uri = await AsyncStorage.getItem('last_model_uri');
       if (uri) {
@@ -781,7 +797,7 @@ export default function App() {
       const time = formatTime(new Date());
       switch (event.type) {
         case 'round_start':
-          if (event.round > 1) setChatLog(prev => [...prev, { role: 'assistant', text: '', time }]);
+          if (event.round > 1) setChatLog(prev => [...prev, { role: 'assistant', text: '', time, model: modelFileName(modelUri) }]);
           break;
         case 'content':
           updateLastAssistant({ text: event.text });
@@ -867,7 +883,7 @@ export default function App() {
     const currentLog = [...chatLog];
 
     const timeStr = formatTime(new Date());
-    setChatLog(prev => [...prev, { role: 'user', text: userMsg, time: timeStr }, { role: 'assistant', text: '', time: timeStr }]);
+    setChatLog(prev => [...prev, { role: 'user', text: userMsg, time: timeStr }, { role: 'assistant', text: '', time: timeStr, model: modelFileName(modelUri) }]);
 
     // Keep input focused so keyboard stays open without dismissal
     inputRef.current?.focus();
@@ -881,8 +897,11 @@ export default function App() {
       await runAgent(userMsg, currentLog);
       return;
     }
-    // Thinking goes through the model's chat template, so the turn takes the agent path without tools.
-    if (thinking) {
+    // Any model with a usable chat template (toolSupport is 'none' only without one) answers through
+    // it, thinking on or off, so the turn takes the agent path without tools. A bare "User: /
+    // Assistant:" transcript makes many models write both sides of the conversation (a Gemma 3 1B
+    // GLM-4.7-Flash fine-tune on an OPPO A53 did), so the plain prompt below is only the fallback.
+    if (toolSupport !== 'none') {
       await runAgent(userMsg, currentLog, { offerTools: false });
       return;
     }
@@ -1151,7 +1170,7 @@ export default function App() {
                 <View key={index} style={[styles.messageWrapper, msg.role === 'user' ? styles.userWrapper : styles.assistantWrapper]}>
                   <View style={styles.messageHeader}>
                     <Text style={[styles.messageSender, { color: msg.role === 'user' ? theme.colors.fg : '#6bc46d' }]}>
-                      • {msg.role === 'user' ? 'You' : (modelUri ? decodeURIComponent(modelUri.split('/').pop()) : 'Assistant')}
+                      • {msg.role === 'user' ? 'You' : (msg.model || 'Assistant')}
                       {msg.time && <Text style={{ color: theme.colors.border, fontWeight: 'normal' }}>  {msg.time}</Text>}
                     </Text>
                   </View>
@@ -1281,7 +1300,7 @@ export default function App() {
                   }}
                   style={styles.dropdownItem}
                 >
-                  <Text style={styles.dropdownItemText}>Tools (MCP)</Text>
+                  <Text style={styles.dropdownItemText}>MCP</Text>
                 </TouchableOpacity>
               </Animated.View>
             )}
@@ -1289,7 +1308,7 @@ export default function App() {
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2, marginLeft: 42, marginRight: 4 }}>
                 <View style={[styles.modelPill, { flexShrink: 1, borderWidth: 0, paddingHorizontal: 0, paddingVertical: 0, backgroundColor: 'transparent', height: 16 }]}>
                   <Text style={[styles.modelPillText, { flexShrink: 1, fontSize: 10, color: theme.colors.border }]} numberOfLines={1}>
-                    {modelUri ? decodeURIComponent(modelUri.split('/').pop()) : 'No Model Loaded'}
+                    {modelFileName(modelUri) || 'No Model Loaded'}
                   </Text>
                   <Text style={[styles.modelPillIcon, { fontSize: 8 }]}>v</Text>
                 </View>

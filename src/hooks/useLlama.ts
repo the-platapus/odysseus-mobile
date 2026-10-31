@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import { initLlama, LlamaContext, JinjaFormattedChatResult } from 'llama.rn';
 import type { CompletionRequest, CompletionResponse } from '../mcp/agentLoop';
-import { beginModelLoad, endModelLoad } from '../diagnostics/loadDiagnostics';
+import { beginModelLoad, beginReply, endModelLoad, endReply, noteReplyToken } from '../diagnostics/loadDiagnostics';
 
 // Raised from 2048 for agent mode: tool schemas, the agent prompt and tool results all share
 // the window. KV cache memory grows with it (roughly +130 MB for a 1B model, more for larger).
@@ -11,6 +11,7 @@ export const LOAD_SETTINGS = {
   n_ctx: N_CTX,
   n_gpu_layers: 99, // Force hardware acceleration
 };
+const PLAIN_N_PREDICT = 256; // Cap the response length to save battery/RAM
 const AGENT_N_PREDICT = 1024;
 // Thinking is capped so a slow phone still gets to the answer: past the budget, llama.cpp
 // closes the thinking block with this nudge and the model has to reply.
@@ -64,6 +65,8 @@ export function useLlama() {
 
   // Keep track of the active context
   const contextRef = useRef<LlamaContext | null>(null);
+  // Its model file, for reports when the app closes mid-reply.
+  const modelPathRef = useRef('');
 
   /**
    * Initializes the LLM with a local model file
@@ -98,6 +101,7 @@ export function useLlama() {
       await endModelLoad();
 
       contextRef.current = ctx;
+      modelPathRef.current = modelPath;
       setToolSupport(detectToolSupport(ctx));
       setSupportsThinking(await detectThinkingSupport(ctx));
       return null;
@@ -126,14 +130,17 @@ export function useLlama() {
     try {
       setIsGenerating(true);
       setError(null);
+      // Saved while the reply runs, so the next launch can tell if the app was killed mid-reply.
+      await beginReply(modelPathRef.current, { mode: 'plain', thinking: false, promptChars: prompt.length, maxTokens: PLAIN_N_PREDICT }).catch(() => {});
 
       const result = await contextRef.current.completion(
         {
           prompt,
-          n_predict: 256, // Cap the response length to save battery/RAM
+          n_predict: PLAIN_N_PREDICT,
           stop: ['User:', '\n\n'], // Simple stop tokens
         },
         (tokenData) => {
+          noteReplyToken();
           if (onToken) {
             onToken(tokenData.token);
           }
@@ -147,6 +154,7 @@ export function useLlama() {
       alert(`Failed to generate response: ${msg}`);
       setError(msg);
     } finally {
+      await endReply().catch(() => {});
       setIsGenerating(false);
     }
   }, []);
@@ -163,6 +171,9 @@ export function useLlama() {
     const ctx = contextRef.current;
     if (!ctx) throw new Error('Model not loaded');
     setIsGenerating(true);
+    const nPredict = AGENT_N_PREDICT + (thinking ? THINKING_BUDGET_TOKENS : 0);
+    const promptChars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+    await beginReply(modelPathRef.current, { mode: tools ? 'agent' : 'template', thinking, promptChars, maxTokens: nPredict }).catch(() => {});
     try {
       const result = await ctx.completion(
         {
@@ -174,10 +185,11 @@ export function useLlama() {
           enable_thinking: thinking,
           reasoning_format: 'auto',
           ...(thinking ? { thinking_budget_tokens: THINKING_BUDGET_TOKENS, thinking_budget_message: THINKING_BUDGET_MESSAGE } : {}),
-          n_predict: AGENT_N_PREDICT + (thinking ? THINKING_BUDGET_TOKENS : 0),
+          n_predict: nPredict,
         },
         // Both fields are the parsed text so far, with tool-call and thinking markup removed.
         (data) => {
+          noteReplyToken();
           if (data.reasoning_content !== undefined) onReasoning?.(data.reasoning_content);
           if (data.content !== undefined) onContent(data.content);
         }
@@ -189,6 +201,7 @@ export function useLlama() {
         interrupted: result.interrupted,
       };
     } finally {
+      await endReply().catch(() => {});
       setIsGenerating(false);
     }
   }, []);

@@ -1,0 +1,43 @@
+# Opened by the app when it closed while a model was answering (src/diagnostics/). The app
+# fills each field through URL parameters named after the field ids below, so keep the ids in
+# sync with issueUrl() in src/diagnostics/report.ts.
+name: App closed while answering
+description: The app closed while a model was writing a reply. The app fills this in for you.
+title: "App closed while answering: "
+labels: ["reply-crash"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. The app filled in the details below. Add anything you noticed in the last box, then submit.
+  - type: textarea
+    id: model
+    attributes:
+      label: Model
+      description: Which model was answering and where it came from.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: What happened
+      description: How far the reply got before the app closed, and the likely cause.
+    validations:
+      required: true
+  - type: textarea
+    id: device
+    attributes:
+      label: Device and app
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: llama.cpp log
+      description: What llama.cpp printed while the model was answering.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Optional. For example, what you asked, whether agent mode was on, or whether the phone got slow first.

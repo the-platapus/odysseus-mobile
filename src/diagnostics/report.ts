@@ -5,9 +5,21 @@
 // unknown architecture, running out of memory, a truncated file), so the report carries the
 // log lines captured during the load, plus the GGUF metadata and the device.
 
+/** How far a reply got before the app closed, from its last save (every couple of seconds). */
+export type ReplyProgress = {
+  /** 'plain': the bare User:/Assistant: prompt. 'template': the model's chat template. 'agent': the template with tools. */
+  mode: 'plain' | 'template' | 'agent';
+  thinking: boolean;
+  promptChars: number;
+  maxTokens: number;
+  tokens: number;
+  seconds: number;
+};
+
 export type LoadFailure = {
-  /** 'error': initLlama threw. 'crash': the app closed while loading (found on next launch). */
+  /** 'error': initLlama threw. 'crash': the app closed while loading, or while answering when `reply` is set (found on next launch). */
   kind: 'error' | 'crash';
+  reply?: ReplyProgress;
   error?: string;
   fileName: string;
   fileSize: number | null;
@@ -42,6 +54,10 @@ export const redactPaths = (text: string) =>
 /** The likeliest cause, in words a tester understands, or null when nothing points to one. */
 export function diagnose(f: LoadFailure): string | null {
   const log = f.log.join('\n');
+  if (f.reply) {
+    const when = f.reply.tokens ? 'while answering' : 'while reading the prompt, before it wrote anything';
+    return `The app closed ${when}. That usually means the phone ran out of memory: phones close apps that use too much without warning. Try a smaller model or a smaller quantization.`;
+  }
   const meta = f.metadata ?? {};
   const arch = log.match(/unknown model architecture: '([^']+)'/);
   if (arch) return `This model's architecture (${arch[1]}) isn't supported by this app's llama.cpp version yet.`;
@@ -113,8 +129,13 @@ export function buildIssue(f: LoadFailure): IssueFields {
     ...metadataLines(f.metadata),
   ].join('\n');
 
+  const r = f.reply;
   const error = [
-    f.kind === 'crash' ? 'The app closed while loading the model (crash or killed by the system).' : `\`${redactPaths(f.error ?? 'Unknown error')}\``,
+    r
+      ? `The app closed while the model was answering (crash or killed by the system). By its last save the reply had ${r.tokens} tokens after ${r.seconds} s (${r.mode} prompt of ${r.promptChars} characters, thinking ${r.thinking ? 'on' : 'off'}, up to ${r.maxTokens} tokens).`
+      : f.kind === 'crash'
+        ? 'The app closed while loading the model (crash or killed by the system).'
+        : `\`${redactPaths(f.error ?? 'Unknown error')}\``,
     ...(cause ? ['', `Likely cause: ${cause}`] : []),
   ].join('\n');
 
@@ -130,7 +151,7 @@ export function buildIssue(f: LoadFailure): IssueFields {
   ].join('\n');
 
   return {
-    title: `Model failed to load: ${f.fileName}`.slice(0, 120),
+    title: `${r ? 'App closed while answering' : 'Model failed to load'}: ${f.fileName}`.slice(0, 120),
     model,
     error,
     device,
