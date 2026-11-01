@@ -56,9 +56,12 @@ Example row:
 
 | Model | Repo | File | Features | Tested on |
 |---|---|---|---|---|
-| MiniCPM5 2B | `openbmb/MiniCPM5-2B-GGUF` | `MiniCPM5-2B-Q4_K_M.gguf` | thinking, tools | iPhone 13 (4 GB), iOS 18.6.2 |
-| Qwen3 0.6B | `Qwen/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q8_0.gguf` | thinking, tools | iPhone 13 (4 GB), iOS 18.6.2 |
-| Gemma 3 1B GLM-4.7-Flash Heretic Thinking | `Andycurrent/Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_GGUF` | `Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf` |  | Waydroid (x86_64), OPPO A53 (4 GB) |
+| MiniCPM5 2B | `openbmb/MiniCPM5-2B-GGUF` | `MiniCPM5-2B-Q4_K_M.gguf` | thinking, tools | iPhone 13 (4 GB), iOS 18.6.2, OnePlus 8 (8 GB) |
+| Qwen3 0.6B | `Qwen/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q8_0.gguf` | thinking, tools | iPhone 13 (4 GB), iOS 18.6.2, OnePlus 8 (8 GB) |
+| Gemma 3 1B GLM-4.7-Flash Heretic Thinking | `Andycurrent/Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_GGUF` | `Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf` |  | Waydroid (x86_64), OPPO A53 (4 GB), OnePlus 8 (8 GB) |
+| Qwen3.8 27B Flash MTP | `SuperLogic/Qwen3.8-27B-Flash-MTP-GGUF` | `Qwen3.8-27B-Flash-MTP.gguf` | thinking, tools | OnePlus 8 (8 GB) |
+| LFM2.5 2.6B Qwen3.8 Turbo Brilliance NEO | `DavidAU/LFM2.5-2.6B-Qwen3.8-Turbo-Brilliance-Power-X12-NEO-MAX-GGUF` | `LFM2.5-2.6B-Q3.8-TBrilliance-NEO-IQ4_XS.gguf` | thinking, tools | OnePlus 8 (8 GB) |
+| MiniCPM5 2B Claude Fable5 heretic | `saidutta69/MiniCPM5-2B-Claude-Fable5-heretic` |  | thinking, tools | OnePlus 8 (8 GB) |
 
 ## Install
 
