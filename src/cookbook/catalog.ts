@@ -2,7 +2,7 @@
 // "Recommended" list parsed from the repo README. No React Native imports, so it can be tested
 // outside the app.
 
-import { whyRepoUnsupported } from '../engines/support';
+import { isCompanionArch, whyRepoUnsupported } from '../engines/support';
 
 export type Feature = 'thinking' | 'tools' | 'moe';
 
@@ -10,7 +10,7 @@ export type CatalogModel = {
   id: string; // Hugging Face repo, e.g. "unsloth/Qwen3-1.7B-GGUF"
   name: string;
   paramsB: number | null;
-  /** Estimated phone RAM needed, in GB (the README's rule of thumb). */
+  /** Estimated phone RAM needed, in GB: from the file's size when it's known, otherwise the README's rule of thumb. */
   ramGb: number | null;
   family: string | null;
   features: Feature[];
@@ -20,6 +20,8 @@ export type CatalogModel = {
   // Only set for entries from the README's "Tested models" table:
   recommended?: boolean;
   file?: string;
+  /** Size of `file` in bytes, looked up on Hugging Face. */
+  fileBytes?: number;
   testedOn?: string;
 };
 
@@ -47,12 +49,23 @@ export function hfModelsUrl({ search, limit = 100 }: { search?: string; limit?: 
   return `https://huggingface.co/api/models?${params.join('&')}`;
 }
 
+/** Every file in a repo; recursive, since some repos keep each quantization in its own folder. */
+export const hfTreeUrl = (repo: string) => `https://huggingface.co/api/models/${repo}/tree/main?recursive=true`;
+
 // --- Model facts -----------------------------------------------------------------------------
 
 // Same rule of thumb as the README: ~0.7 GB per billion parameters at 4 bits, plus 1.5 GB for the system.
 export const GB_PER_BILLION_PARAMS = 0.7;
 export const SYSTEM_RAM_GB = 1.5;
 export const ramNeededGb = (paramsB: number) => Math.ceil(paramsB * GB_PER_BILLION_PARAMS + SYSTEM_RAM_GB);
+
+/**
+ * The download's own rule when the exact file is known: the file plus room for the system. Not
+ * rounded up, so it agrees with the download on a phone right at the limit.
+ */
+export const ramForFileGb = (bytes: number) => bytes / 1024 ** 3 + SYSTEM_RAM_GB;
+
+export const withFileBytes = (m: CatalogModel, bytes: number): CatalogModel => ({ ...m, fileBytes: bytes, ramGb: ramForFileGb(bytes) });
 
 /** "Qwen3-1.7B-Instruct" -> 1.7; MoE names give the total ("24B-A2B" -> 24). */
 export function paramsFromName(name: string): number | null {
@@ -92,9 +105,12 @@ const displayName = (id: string) => (id.split('/').pop() ?? id).replace(/[-_]GGU
 
 export function fromHfModel(m: HfApiModel): CatalogModel {
   const tags = (m.tags ?? []).map((t) => t.toLowerCase());
-  const template = m.gguf?.chat_template ?? '';
+  // Hugging Face describes a repo by one of its files. When that's a vision projector or draft
+  // model, none of it is the model's: SuperLogic/Qwen3.8-27B-Flash-MTP-GGUF reads 0.46B "clip".
+  const gguf = isCompanionArch(m.gguf?.architecture) ? undefined : m.gguf;
+  const template = gguf?.chat_template ?? '';
   const id = m.id.toLowerCase();
-  const paramsB = m.gguf?.total ? Math.round(m.gguf.total / 1e8) / 10 : paramsFromName(m.id);
+  const paramsB = gguf?.total ? Math.round(gguf.total / 1e8) / 10 : paramsFromName(m.id);
 
   const features: Feature[] = [];
   // The chat template is the best evidence: it's what llama.cpp will actually use.
@@ -113,8 +129,8 @@ export function fromHfModel(m: HfApiModel): CatalogModel {
     ramGb: paramsB ? ramNeededGb(paramsB) : null,
     family: familyOf(m.id, m.tags),
     features,
-    architecture: m.gguf?.architecture ?? null,
-    contextLength: m.gguf?.context_length ?? null,
+    architecture: gguf?.architecture ?? null,
+    contextLength: gguf?.context_length ?? null,
     downloads: m.downloads ?? 0,
   };
 }
@@ -143,6 +159,7 @@ export type Filters = {
 
 export const NO_FILTERS: Filters = { fitsPhone: false, size: null, feature: null, family: null };
 
+/** The phone's RAM in exact GB (not rounded), so it compares like the download does. */
 export const fitsPhone = (m: CatalogModel, phoneRamGb: number | null) =>
   phoneRamGb === null || m.ramGb === null || m.ramGb <= phoneRamGb;
 

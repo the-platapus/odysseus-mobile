@@ -108,6 +108,10 @@ export function whyUnsupported(facts: ModelFacts): Problem | null {
   return first;
 }
 
+/** A file that ships next to a model (vision projector, draft model), not a model itself. */
+export const isCompanionArch = (architecture: string | null | undefined) =>
+  !!architecture && ENGINES.some((e) => e.companionArchs.includes(architecture));
+
 /**
  * The same for a whole Hugging Face repo, from the architecture Hugging Face reports for it.
  * That comes from one of its files, which may be a vision projector or draft model next to a

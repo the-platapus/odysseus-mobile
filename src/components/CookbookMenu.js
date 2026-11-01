@@ -10,12 +10,15 @@ import {
   fitsPhone,
   fromHfModel,
   hfModelsUrl,
+  hfTreeUrl,
   matchesFilters,
   matchesQuery,
   parseRecommended,
   runsHere,
   whyCantRun,
+  withFileBytes,
 } from '../cookbook/catalog';
+import { findFile, sizeOf } from '../cookbook/ggufPicker';
 import { README_RAW_URL } from '../repo';
 import { theme, themed } from '../theme';
 import LoadingWave from './LoadingWave';
@@ -25,6 +28,9 @@ const RECOMMENDED_CACHE_KEY = '@odysseus_recommended_cache';
 const OK_GREEN = '#6bc46d';
 const CARD_COLORS = themed(() => [theme.colors.fg, theme.colors.red, theme.colors.border, theme.colors.fg]);
 
+const GIB = 1024 ** 3;
+const formatRam = (gb) => (Number.isInteger(gb) ? String(gb) : gb.toFixed(1));
+
 const formatDownloads = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
 // Fetch and parse, falling back to the last parsed copy saved for offline use.
@@ -32,7 +38,7 @@ async function fetchCached(url, cacheKey, { asText = false, parse }) {
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const value = parse(await (asText ? response.text() : response.json()));
+    const value = await parse(await (asText ? response.text() : response.json()));
     await AsyncStorage.setItem(cacheKey, JSON.stringify(value)).catch(() => {});
     return { value, offline: false };
   } catch (err) {
@@ -41,6 +47,23 @@ async function fetchCached(url, cacheKey, { asText = false, parse }) {
     throw err;
   }
 }
+
+// Tested models name their exact file, so their RAM estimate comes from its real size instead
+// of the parameter count in the name: Qwen3.8 27B, quantized to under 2 bits, is a 6.2 GB file
+// that ran on an 8 GB OnePlus 8 while the name's estimate said 21 GB. A row whose size can't be
+// looked up keeps the name's estimate.
+const withFileSizes = (models) =>
+  Promise.all(models.map(async (m) => {
+    if (!m.file) return m;
+    try {
+      const response = await fetch(hfTreeUrl(m.id));
+      if (!response.ok) return m;
+      const entry = findFile(await response.json(), m.file);
+      return entry && sizeOf(entry) ? withFileBytes(m, sizeOf(entry)) : m;
+    } catch {
+      return m;
+    }
+  }));
 
 function Chip({ label, count, active, onPress }) {
   return (
@@ -54,10 +77,12 @@ function Chip({ label, count, active, onPress }) {
 }
 
 function ModelCard({ model, color, phoneRamGb, onPress }) {
-  const tooBig = !fitsPhone(model, phoneRamGb);
+  // Only a warning: the estimate can be far off, so a model that may not fit can still be
+  // downloaded and tried.
+  const mayNotFit = !fitsPhone(model, phoneRamGb);
   // Flagged before anyone downloads it: the download would only fail to load.
   const problem = whyCantRun(model);
-  const isUnsupported = tooBig || !!problem;
+  const badgeColor = problem ? theme.colors.border : mayNotFit ? theme.colors.red : color;
   const facts = [
     model.paramsB ? `${model.paramsB}B` : null,
     model.architecture,
@@ -69,25 +94,25 @@ function ModelCard({ model, color, phoneRamGb, onPress }) {
     <TouchableOpacity
       style={[
         styles.card,
-        { borderLeftColor: isUnsupported ? theme.colors.border : color, borderLeftWidth: 4 },
-        isUnsupported && styles.cardDisabled,
+        { borderLeftColor: problem ? theme.colors.border : color, borderLeftWidth: 4 },
+        problem && styles.cardDisabled,
       ]}
       onPress={() => onPress(model)}
-      disabled={isUnsupported}
+      disabled={!!problem}
     >
       <View style={styles.cardTop}>
         <Text style={styles.cardTitle}>{model.name}</Text>
         <Text style={[styles.badge, {
-          backgroundColor: isUnsupported ? theme.colors.bg : color + '20',
-          color: isUnsupported ? theme.colors.border : color,
+          backgroundColor: problem ? theme.colors.bg : badgeColor + '20',
+          color: badgeColor,
         }]}>
-          {model.ramGb ? `≈${model.ramGb}GB RAM` : 'RAM ?'}
+          {model.ramGb ? `≈${formatRam(model.ramGb)}GB RAM` : 'RAM ?'}
         </Text>
       </View>
-      <Text style={styles.cardQuant} numberOfLines={1}>
+      <Text style={[styles.cardQuant, !problem && mayNotFit && { color: theme.colors.red }]} numberOfLines={1}>
         {problem
           ? problem.label.charAt(0).toUpperCase() + problem.label.slice(1)
-          : tooBig ? `Requires ${model.ramGb}GB RAM` : model.id}
+          : mayNotFit ? `May not fit: needs ≈${formatRam(model.ramGb)}GB RAM` : model.id}
       </Text>
       {facts.length > 0 && <Text style={styles.cardDesc} numberOfLines={1}>{facts.join(' · ')}</Text>}
       {(model.recommended || model.features.length > 0) && (
@@ -114,8 +139,9 @@ export default function CookbookMenu({ onSelectModel }) {
   const [search, setSearch] = useState({ query: '', models: [], error: null });
   const [filters, setFilters] = useState(NO_FILTERS);
 
-  // Device.totalMemory returns bytes. Convert to GB and round up/down.
-  const totalRamGB = Device.totalMemory ? Math.round(Device.totalMemory / (1024 * 1024 * 1024)) : null;
+  // Device.totalMemory is in bytes. Exact for comparing with estimates, rounded for the header.
+  const phoneRamGb = Device.totalMemory ? Device.totalMemory / GIB : null;
+  const totalRamGB = phoneRamGb !== null ? Math.round(phoneRamGb) : null;
 
   useEffect(() => {
     // Trending GGUF models straight from Hugging Face; the last list is kept for offline use.
@@ -130,7 +156,7 @@ export default function CookbookMenu({ onSelectModel }) {
         setTrending([]);
       });
     // Recommended = the "Tested models" table in the repo README, so it's updated by editing the README.
-    fetchCached(README_RAW_URL, RECOMMENDED_CACHE_KEY, { asText: true, parse: parseRecommended })
+    fetchCached(README_RAW_URL, RECOMMENDED_CACHE_KEY, { asText: true, parse: (text) => withFileSizes(parseRecommended(text)) })
       .then(({ value }) => setRecommended(value))
       .catch((err) => console.log(`App Alert: Failed to fetch recommended models: ${err.message}`));
   }, []);
@@ -167,17 +193,17 @@ export default function CookbookMenu({ onSelectModel }) {
         : [];
   const recommendedBase = query.trim() ? recommended.filter((m) => matchesQuery(m, query.trim())) : recommended;
 
-  const counts = chipCounts([...recommendedBase, ...base], totalRamGB);
+  const counts = chipCounts([...recommendedBase, ...base], phoneRamGb);
   const recommendedIds = new Set(recommended.map((m) => m.id));
-  const recommendedShown = recommendedBase.filter((m) => matchesFilters(m, filters, totalRamGB));
+  const recommendedShown = recommendedBase.filter((m) => matchesFilters(m, filters, phoneRamGb));
   const listShown = base
-    .filter((m) => !recommendedIds.has(m.id) && matchesFilters(m, filters, totalRamGB))
+    .filter((m) => !recommendedIds.has(m.id) && matchesFilters(m, filters, phoneRamGb))
     .map((m, index) => ({ m, index }))
     // Models that can run here come first. The trending list then goes smallest first (the old
     // order); search results keep Hugging Face's ranking.
     .sort((a, b) => {
-      const af = runsHere(a.m, totalRamGB);
-      const bf = runsHere(b.m, totalRamGB);
+      const af = runsHere(a.m, phoneRamGb);
+      const bf = runsHere(b.m, phoneRamGb);
       if (af !== bf) return af ? -1 : 1;
       return searchActive ? a.index - b.index : (a.m.ramGb ?? 99) - (b.m.ramGb ?? 99);
     })
@@ -250,7 +276,7 @@ export default function CookbookMenu({ onSelectModel }) {
               <Text style={styles.sectionTitle}>Recommended</Text>
               <Text style={styles.sectionSub}>Tested and working in this app.</Text>
               {recommendedShown.map((model) => (
-                <ModelCard key={`rec-${model.id}-${model.file ?? ''}`} model={model} color={OK_GREEN} phoneRamGb={totalRamGB} onPress={onSelectModel} />
+                <ModelCard key={`rec-${model.id}-${model.file ?? ''}`} model={model} color={OK_GREEN} phoneRamGb={phoneRamGb} onPress={onSelectModel} />
               ))}
             </>
           )}
@@ -271,7 +297,7 @@ export default function CookbookMenu({ onSelectModel }) {
             <Text style={styles.sectionSub}>No models match{noFilters ? '' : ' these filters'}.</Text>
           )}
           {listShown.map((model, index) => (
-            <ModelCard key={model.id} model={model} color={CARD_COLORS[index % CARD_COLORS.length]} phoneRamGb={totalRamGB} onPress={onSelectModel} />
+            <ModelCard key={model.id} model={model} color={CARD_COLORS[index % CARD_COLORS.length]} phoneRamGb={phoneRamGb} onPress={onSelectModel} />
           ))}
         </ScrollView>
       )}

@@ -43,7 +43,7 @@ import { runAgentTurn, buildAgentSystemPrompt, trimHistory } from './src/mcp/age
 import { chatLogToMessages } from './src/mcp/chatLog';
 import { setAgentMode } from './src/mcp/runtime';
 import { COMFORTABLE_RAM_SHARE, pickGgufFile } from './src/cookbook/ggufPicker';
-import { SYSTEM_RAM_GB } from './src/cookbook/catalog';
+import { SYSTEM_RAM_GB, hfTreeUrl } from './src/cookbook/catalog';
 import { fetchGgufMetadata, ggufFacts } from './src/engines/ggufHeader';
 import { whyUnsupported } from './src/engines/support';
 import { fetch as streamingFetch } from 'expo/fetch';
@@ -82,15 +82,24 @@ const startReplyWork = (question) => {
   };
 };
 
-// Ask before downloading a file that's bigger than the phone can likely hold.
-const confirmLargeDownload = (file) => new Promise(resolve => {
-  const ram = Device.totalMemory ? `${Math.round(Device.totalMemory / GB)} GB` : 'an unknown amount';
+// Largest model file the phone can likely hold in RAM, leaving room for the system like the
+// Cookbook's estimate does; null when the phone doesn't report its RAM.
+const maxModelBytes = () => (Device.totalMemory ? Device.totalMemory - SYSTEM_RAM_GB * GB : null);
+const mayNotFit = (bytes) => {
+  const max = maxModelBytes();
+  return max !== null && !!bytes && bytes > max;
+};
+
+// Ask before downloading or loading a file that's bigger than the phone can likely hold. Only a
+// warning: the estimate can be far off, and a model nobody can try never gets tested.
+const confirmMayNotFit = (fileName, bytes, action) => new Promise(resolve => {
+  const ram = Device.totalMemory ? `${(Device.totalMemory / GB).toFixed(1)} GB` : 'an unknown amount';
   Alert.alert(
     'Model may be too big',
-    `${file.path.split('/').pop()} is ${(file.size / GB).toFixed(1)} GB and this phone has ${ram} of RAM, so it will probably fail to load. Download anyway?`,
+    `${fileName} is ${(bytes / GB).toFixed(1)} GB and this phone has ${ram} of RAM, so it may not fit. That's only an estimate, so you can still try it. If the app closes, it offers a report the next time it opens.`,
     [
       { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-      { text: 'Download', onPress: () => resolve(true) },
+      { text: action, onPress: () => resolve(true) },
     ],
     { cancelable: true, onDismiss: () => resolve(false) }
   );
@@ -553,7 +562,8 @@ export default function App() {
       });
 
       if (!result.canceled && result.assets.length > 0) {
-        const uri = result.assets[0].uri;
+        const { uri, name, size } = result.assets[0];
+        if (mayNotFit(size) && !(await confirmMayNotFit(name, size, 'Load'))) return;
         // In Expo, the URI from document picker usually has 'file://' prefix which llama.rn handles
         await handleLoadModel(uri);
       }
@@ -616,14 +626,13 @@ export default function App() {
     downloadsRef.current.set(id, entry);
     setDownloads(prev => [...prev, { id, finalUri: null, phase: 'querying', progress: 0, status: `Querying HuggingFace for ${model.name}...` }]);
     try {
-      // recursive=true: some repos keep each quantization in its own folder.
-      const treeRes = await fetch(`https://huggingface.co/api/models/${model.id}/tree/main?recursive=true`);
+      const treeRes = await fetch(hfTreeUrl(model.id));
       if (!treeRes.ok) throw new Error("Failed to fetch model tree from HuggingFace");
       const tree = await treeRes.json();
 
       // Leave room for the system, like the Cookbook's RAM estimate does, and go for a
       // higher-quality file when one is small enough to run comfortably.
-      const maxBytes = Device.totalMemory ? Device.totalMemory - SYSTEM_RAM_GB * GB : undefined;
+      const maxBytes = maxModelBytes() ?? undefined;
       const comfortableBytes = Device.totalMemory ? Device.totalMemory * COMFORTABLE_RAM_SHARE : undefined;
       const pick = pickGgufFile(tree, model.file, maxBytes, comfortableBytes);
       if (!pick.ok) throw new Error(pick.error);
@@ -640,7 +649,7 @@ export default function App() {
         Alert.alert(`Can't run ${model.name}`, `${problem.reason}\n\nNothing was downloaded.`);
         return;
       }
-      if (!pick.fits && !(await confirmLargeDownload(file))) {
+      if (!pick.fits && !(await confirmMayNotFit(fileName, file.size, 'Download'))) {
         removeDownload(id);
         return;
       }
@@ -1220,10 +1229,18 @@ export default function App() {
                       const loading = isInitializing && modelUri === m.uri;
                       return (
                         <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, backgroundColor: theme.colors.panel, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: loaded ? theme.colors.fg : theme.colors.border }}>
-                          <TouchableOpacity style={{ flex: 1 }} onPress={() => { setIsCookbookVisible(false); if (!loaded) handleLoadModel(m.uri); }}>
+                          <TouchableOpacity
+                            style={{ flex: 1 }}
+                            onPress={async () => {
+                              if (!loaded && mayNotFit(m.size) && !(await confirmMayNotFit(m.name, m.size, 'Load'))) return;
+                              setIsCookbookVisible(false);
+                              if (!loaded) handleLoadModel(m.uri);
+                            }}
+                          >
                             <Text style={{ color: theme.colors.fg, fontFamily: monoFont, fontSize: 14 }} numberOfLines={1}>{m.name}</Text>
                             <Text style={{ color: theme.colors.border, fontFamily: monoFont, fontSize: 12, marginTop: 4 }}>
                               {(m.size / 1e9).toFixed(2)} GB
+                              {!loaded && !loading && mayNotFit(m.size) && <Text style={{ color: theme.colors.red }}>  · may not fit in RAM</Text>}
                               {(loaded || loading) && <Text style={{ color: theme.colors.fg }}>{loaded ? '  · loaded' : '  · loading'}</Text>}
                             </Text>
                           </TouchableOpacity>

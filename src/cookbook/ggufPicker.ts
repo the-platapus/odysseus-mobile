@@ -67,7 +67,11 @@ export const COMFORTABLE_RAM_SHARE = 0.25;
 const FULL_PRECISION = /(?:^|[-_.])(F16|BF16|F32|FP16|FP32)(?:[-_.]|$)/;
 
 const basename = (path: string) => path.split('/').pop() ?? path;
-const sizeOf = (entry: HfTreeEntry) => entry.lfs?.size ?? entry.size ?? 0;
+export const sizeOf = (entry: HfTreeEntry) => entry.lfs?.size ?? entry.size ?? 0;
+
+/** The tree entry for `file`, given as its full path or just its name. */
+export const findFile = (tree: HfTreeEntry[], file: string) =>
+  tree.find((e) => e.type === 'file' && (e.path === file || basename(e.path) === file));
 
 export function quantOf(path: string): { rank: number; quant: string } {
   const name = basename(path).toUpperCase();
@@ -97,7 +101,8 @@ export function unloadableReason(path: string, size = 0): string | null {
  * @param tree      repo listing (use `?recursive=true` so subfolders are included)
  * @param preferred exact path to use, e.g. from the Recommended list
  * @param maxBytes  largest file the phone can likely hold in RAM; the best-ranked file under it
- *                  wins, otherwise the best-ranked file overall is returned with fits=false
+ *                  wins, otherwise the smallest file is returned with fits=false (RAM estimates
+ *                  can be off, so it may still run, and the smallest has the best chance)
  * @param comfortableBytes largest file that runs comfortably (see COMFORTABLE_RAM_SHARE); the
  *                  highest-quality file under it (Q8_0 down to Q5) wins over the 4-bit ranking
  */
@@ -106,7 +111,7 @@ export function pickGgufFile(tree: HfTreeEntry[], preferred?: string, maxBytes?:
   const fitsIn = (size: number) => !maxBytes || !size || size <= maxBytes;
 
   if (preferred) {
-    const entry = files.find((e) => e.path === preferred || basename(e.path) === preferred);
+    const entry = findFile(files, preferred);
     if (!entry) return { ok: false, error: `The file ${preferred} is no longer in this repo.` };
     const size = sizeOf(entry);
     // A split model's part count is too far into the file for the header check to see.
@@ -139,6 +144,6 @@ export function pickGgufFile(tree: HfTreeEntry[], preferred?: string, maxBytes?:
       if (roomy) return { ok: true, file: { path: roomy.path, size: roomy.size, quant: roomy.quant }, fits: true };
     }
   }
-  const best = pool.find((f) => fitsIn(f.size)) ?? pool[0];
+  const best = pool.find((f) => fitsIn(f.size)) ?? pool.reduce((a, b) => (b.size < a.size ? b : a));
   return { ok: true, file: { path: best.path, size: best.size, quant: best.quant }, fits: fitsIn(best.size) };
 }
