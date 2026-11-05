@@ -3,6 +3,7 @@
 // outside the app.
 
 import { isCompanionArch, whyRepoUnsupported } from '../engines/support';
+import { officialRepoOf, type ArenaScore } from './arena';
 
 export type Feature = 'thinking' | 'tools' | 'moe';
 
@@ -17,6 +18,10 @@ export type CatalogModel = {
   architecture: string | null;
   contextLength: number | null;
   downloads: number;
+  /** The official repo this one is (itself, or what it quantizes under the same name); see arena.ts. */
+  officialRepo?: string | null;
+  /** Its LMArena score, set by the Cookbook once the scores are loaded. */
+  arena?: ArenaScore | null;
   // Only set for entries from the README's "Tested models" table:
   recommended?: boolean;
   file?: string;
@@ -132,6 +137,7 @@ export function fromHfModel(m: HfApiModel): CatalogModel {
     architecture: gguf?.architecture ?? null,
     contextLength: gguf?.context_length ?? null,
     downloads: m.downloads ?? 0,
+    officialRepo: officialRepoOf(m.id, m.tags),
   };
 }
 
@@ -155,9 +161,11 @@ export type Filters = {
   size: string | null;
   feature: Feature | null;
   family: string | null;
+  /** Only models with an LMArena score, best first. */
+  arena: boolean;
 };
 
-export const NO_FILTERS: Filters = { fitsPhone: false, size: null, feature: null, family: null };
+export const NO_FILTERS: Filters = { fitsPhone: false, size: null, feature: null, family: null, arena: false };
 
 /** The phone's RAM in exact GB (not rounded), so it compares like the download does. */
 export const fitsPhone = (m: CatalogModel, phoneRamGb: number | null) =>
@@ -180,6 +188,7 @@ export function matchesFilters(m: CatalogModel, f: Filters, phoneRamGb: number |
   if (f.size && !inBucket(m, f.size)) return false;
   if (f.feature && !m.features.includes(f.feature)) return false;
   if (f.family && m.family !== f.family) return false;
+  if (f.arena && !m.arena) return false;
   return true;
 }
 
@@ -196,6 +205,7 @@ export function chipCounts(models: CatalogModel[], phoneRamGb: number | null) {
   return {
     all: models.length,
     fitsPhone: models.filter((m) => runsHere(m, phoneRamGb)).length,
+    arena: models.filter((m) => m.arena).length,
     sizes: Object.fromEntries(SIZE_BUCKETS.map((b) => [b.key, models.filter((m) => inBucket(m, b.key)).length])),
     features: Object.fromEntries(FEATURES.map((f) => [f.key, models.filter((m) => m.features.includes(f.key)).length])),
     families: [...families].sort((a, b) => b[1] - a[1]).slice(0, 10),
@@ -287,6 +297,7 @@ export function parseRecommended(markdown: string): CatalogModel[] {
       architecture: null,
       contextLength: null,
       downloads: 0,
+      officialRepo: officialRepoOf(repo),
       recommended: true,
       ...(file.toLowerCase().endsWith('.gguf') ? { file } : {}),
       ...(get(cols.testedOn) ? { testedOn: get(cols.testedOn) } : {}),

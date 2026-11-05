@@ -18,6 +18,7 @@ import {
   whyCantRun,
   withFileBytes,
 } from '../cookbook/catalog';
+import { arenaScoreOf, fetchArenaBoard } from '../cookbook/arena';
 import { findFile, sizeOf } from '../cookbook/ggufPicker';
 import { README_RAW_URL } from '../repo';
 import { theme, themed } from '../theme';
@@ -25,6 +26,7 @@ import LoadingWave from './LoadingWave';
 
 const TRENDING_CACHE_KEY = '@odysseus_cookbook_cache_v2';
 const RECOMMENDED_CACHE_KEY = '@odysseus_recommended_cache';
+const ARENA_CACHE_KEY = '@odysseus_arena_cache';
 const OK_GREEN = '#6bc46d';
 const CARD_COLORS = themed(() => [theme.colors.fg, theme.colors.red, theme.colors.border, theme.colors.fg]);
 
@@ -33,12 +35,10 @@ const formatRam = (gb) => (Number.isInteger(gb) ? String(gb) : gb.toFixed(1));
 
 const formatDownloads = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
-// Fetch and parse, falling back to the last parsed copy saved for offline use.
-async function fetchCached(url, cacheKey, { asText = false, parse }) {
+// Load, falling back to the last copy saved for offline use.
+async function loadCached(cacheKey, load) {
   try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const value = await parse(await (asText ? response.text() : response.json()));
+    const value = await load();
     await AsyncStorage.setItem(cacheKey, JSON.stringify(value)).catch(() => {});
     return { value, offline: false };
   } catch (err) {
@@ -47,6 +47,13 @@ async function fetchCached(url, cacheKey, { asText = false, parse }) {
     throw err;
   }
 }
+
+const fetchCached = (url, cacheKey, { asText = false, parse }) =>
+  loadCached(cacheKey, async () => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return parse(await (asText ? response.text() : response.json()));
+  });
 
 // Tested models name their exact file, so their RAM estimate comes from its real size instead
 // of the parameter count in the name: Qwen3.8 27B, quantized to under 2 bits, is a 6.2 GB file
@@ -76,7 +83,7 @@ function Chip({ label, count, active, onPress }) {
   );
 }
 
-function ModelCard({ model, color, phoneRamGb, onPress }) {
+function ModelCard({ model, color, phoneRamGb, arena, onPress }) {
   // Only a warning: the estimate can be far off, so a model that may not fit can still be
   // downloaded and tried.
   const mayNotFit = !fitsPhone(model, phoneRamGb);
@@ -115,8 +122,13 @@ function ModelCard({ model, color, phoneRamGb, onPress }) {
           : mayNotFit ? `May not fit: needs ≈${formatRam(model.ramGb)}GB RAM` : model.id}
       </Text>
       {facts.length > 0 && <Text style={styles.cardDesc} numberOfLines={1}>{facts.join(' · ')}</Text>}
-      {(model.recommended || model.features.length > 0) && (
+      {(model.recommended || model.features.length > 0 || !!arena) && (
         <View style={styles.tagRow}>
+          {!!arena && (
+            <Text style={[styles.tag, { color: theme.colors.fg, borderColor: theme.colors.fg }]}>
+              arena #{arena.rank} · {Math.round(arena.rating)}
+            </Text>
+          )}
           {model.recommended && <Text style={[styles.tag, { color: OK_GREEN, borderColor: OK_GREEN }]}>tested</Text>}
           {model.features.map((f) => (
             <Text key={f} style={styles.tag}>{FEATURES.find((x) => x.key === f)?.label ?? f}</Text>
@@ -138,6 +150,8 @@ export default function CookbookMenu({ onSelectModel }) {
   // Results are kept with the query they answer, so a stale reply is never shown.
   const [search, setSearch] = useState({ query: '', models: [], error: null });
   const [filters, setFilters] = useState(NO_FILTERS);
+  // LMArena scores, loaded the first time the arena pill is turned on.
+  const [arena, setArena] = useState({ board: null, loading: false, error: null });
 
   // Device.totalMemory is in bytes. Exact for comparing with estimates, rounded for the header.
   const phoneRamGb = Device.totalMemory ? Device.totalMemory / GIB : null;
@@ -191,17 +205,22 @@ export default function CookbookMenu({ onSelectModel }) {
       : search.query === debouncedQuery
         ? search.models
         : [];
-  const recommendedBase = query.trim() ? recommended.filter((m) => matchesQuery(m, query.trim())) : recommended;
+  const recommendedQueried = query.trim() ? recommended.filter((m) => matchesQuery(m, query.trim())) : recommended;
+  const withArena = (m) => ({ ...m, arena: arenaScoreOf(m.officialRepo, arena.board) });
+  const scored = arena.board ? base.map(withArena) : base;
+  const recommendedBase = arena.board ? recommendedQueried.map(withArena) : recommendedQueried;
 
-  const counts = chipCounts([...recommendedBase, ...base], phoneRamGb);
+  const counts = chipCounts([...recommendedBase, ...scored], phoneRamGb);
   const recommendedIds = new Set(recommended.map((m) => m.id));
   const recommendedShown = recommendedBase.filter((m) => matchesFilters(m, filters, phoneRamGb));
-  const listShown = base
+  const listShown = scored
     .filter((m) => !recommendedIds.has(m.id) && matchesFilters(m, filters, phoneRamGb))
     .map((m, index) => ({ m, index }))
-    // Models that can run here come first. The trending list then goes smallest first (the old
-    // order); search results keep Hugging Face's ranking.
+    // The arena pill ranks by score, best first. Otherwise models that can run here come first;
+    // the trending list then goes smallest first (the old order) and search results keep
+    // Hugging Face's ranking.
     .sort((a, b) => {
+      if (filters.arena) return b.m.arena.rating - a.m.arena.rating;
       const af = runsHere(a.m, phoneRamGb);
       const bf = runsHere(b.m, phoneRamGb);
       if (af !== bf) return af ? -1 : 1;
@@ -209,8 +228,17 @@ export default function CookbookMenu({ onSelectModel }) {
     })
     .map(({ m }) => m);
 
-  const toggle = (key, value) => setFilters((f) => ({ ...f, [key]: f[key] === value ? (key === 'fitsPhone' ? false : null) : value }));
-  const noFilters = !filters.fitsPhone && !filters.size && !filters.feature && !filters.family;
+  const toggle = (key, value) => setFilters((f) => ({ ...f, [key]: f[key] === value ? NO_FILTERS[key] : value }));
+  const noFilters = !filters.fitsPhone && !filters.size && !filters.feature && !filters.family && !filters.arena;
+
+  const toggleArena = () => {
+    toggle('arena', true);
+    if (filters.arena || arena.board || arena.loading) return;
+    setArena({ board: null, loading: true, error: null });
+    loadCached(ARENA_CACHE_KEY, fetchArenaBoard)
+      .then(({ value }) => setArena({ board: value, loading: false, error: null }))
+      .catch((err) => setArena({ board: null, loading: false, error: err.message || 'Failed to load' }));
+  };
 
   return (
     <View style={styles.container}>
@@ -247,6 +275,7 @@ export default function CookbookMenu({ onSelectModel }) {
         {totalRamGB !== null && (
           <Chip label="fits phone" count={counts.fitsPhone} active={filters.fitsPhone} onPress={() => toggle('fitsPhone', true)} />
         )}
+        <Chip label="arena" count={arena.board ? counts.arena : undefined} active={filters.arena} onPress={toggleArena} />
         <View style={styles.chipDivider} />
         {SIZE_BUCKETS.filter((b) => counts.sizes[b.key] || filters.size === b.key).map((b) => (
           <Chip key={b.key} label={b.label} count={counts.sizes[b.key]} active={filters.size === b.key} onPress={() => toggle('size', b.key)} />
@@ -276,7 +305,7 @@ export default function CookbookMenu({ onSelectModel }) {
               <Text style={styles.sectionTitle}>Recommended</Text>
               <Text style={styles.sectionSub}>Tested and working in this app.</Text>
               {recommendedShown.map((model) => (
-                <ModelCard key={`rec-${model.id}-${model.file ?? ''}`} model={model} color={OK_GREEN} phoneRamGb={phoneRamGb} onPress={onSelectModel} />
+                <ModelCard key={`rec-${model.id}-${model.file ?? ''}`} model={model} color={OK_GREEN} phoneRamGb={phoneRamGb} arena={filters.arena ? model.arena : null} onPress={onSelectModel} />
               ))}
             </>
           )}
@@ -287,17 +316,27 @@ export default function CookbookMenu({ onSelectModel }) {
           {(isOffline || searchFailed) && (
             <Text style={styles.sectionSub}>Offline: showing the last saved list.</Text>
           )}
+          {filters.arena && (arena.loading ? (
+            <LoadingWave label="Loading Arena scores" size={12} style={styles.sectionSub} />
+          ) : arena.error ? (
+            <Text style={styles.sectionSub}>Could not load the Arena scores: {arena.error}</Text>
+          ) : arena.board && (
+            <Text style={styles.sectionSub}>
+              {`Ranked by LMArena's text leaderboard (arena.ai, CC BY 4.0) of ${arena.board.publishedOn}. Only official ` +
+                'releases and plain quantizations of them have a score, so search (e.g. "gemma", "llama") to find more.'}
+            </Text>
+          ))}
           {error && !base.length && (
             <View style={styles.errorContainer}>
               <Text style={styles.errorText}>Could not load the Odysseus cookbook.</Text>
               <Text style={styles.errorSubText}>{error}</Text>
             </View>
           )}
-          {!isSearching && !error && listShown.length === 0 && (
+          {!isSearching && !error && !(filters.arena && arena.loading) && listShown.length === 0 && (
             <Text style={styles.sectionSub}>No models match{noFilters ? '' : ' these filters'}.</Text>
           )}
           {listShown.map((model, index) => (
-            <ModelCard key={model.id} model={model} color={CARD_COLORS[index % CARD_COLORS.length]} phoneRamGb={phoneRamGb} onPress={onSelectModel} />
+            <ModelCard key={model.id} model={model} color={CARD_COLORS[index % CARD_COLORS.length]} phoneRamGb={phoneRamGb} arena={filters.arena ? model.arena : null} onPress={onSelectModel} />
           ))}
         </ScrollView>
       )}
