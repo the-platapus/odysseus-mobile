@@ -343,6 +343,15 @@ export class McpManager {
     return schemas;
   }
 
+  /**
+   * What the tool router may use besides a tool's schema. Keywords only count from built-ins:
+   * they aren't shown to the model or the user, so a remote server could stuff them unseen.
+   */
+  getToolHints(name: string): { builtin: boolean; keywords?: string } {
+    const resolved = this.resolveTool(name);
+    return resolved && this.isBuiltin(resolved.serverId) ? { builtin: true, keywords: resolved.tool.keywords } : { builtin: false };
+  }
+
   /** Call a tool by qualified name. Never throws: failures come back as isError results. */
   async callTool(name: string, args: Record<string, unknown>, timeoutMs = CALL_TIMEOUT_MS): Promise<ToolResult> {
     const resolved = this.resolveTool(name);

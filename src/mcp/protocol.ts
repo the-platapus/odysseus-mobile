@@ -58,6 +58,8 @@ export type McpTool = {
   description?: string;
   inputSchema: JsonSchema;
   annotations?: ToolAnnotations;
+  /** Not part of MCP: words a user might say for this tool, for the tool router. Never sent to the model. */
+  keywords?: string;
 };
 
 export type McpContent =

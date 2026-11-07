@@ -99,6 +99,7 @@ export function createMemoryServer(store: MemoryStore): McpServer {
       {
         name: 'manage_memory',
         description: "Manage the user's memory system: list, add, edit, delete, or search memories.",
+        keywords: 'remember memory memories forget recall know about preference prefer note name keep mind always never',
         // No annotations, as in Odysseus: list/search are classified read-only per call
         // (see mcpCallIsReadonly), add/edit/delete ask for approval.
         inputSchema: {

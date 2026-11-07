@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import { initLlama, LlamaContext, JinjaFormattedChatResult } from 'llama.rn';
 import type { CompletionRequest, CompletionResponse } from '../mcp/agentLoop';
 import { beginModelLoad, beginReply, endModelLoad, endReply, noteReplyToken } from '../diagnostics/loadDiagnostics';
+import { readReply } from '../chat/thinking';
 
 // Raised from 2048 for agent mode: tool schemas, the agent prompt and tool results all share
 // the window. KV cache memory grows with it (roughly +130 MB for a 1B model, more for larger).
@@ -167,8 +168,9 @@ export function useLlama() {
 
   /**
    * One round through the model's own chat template (Jinja), optionally with tool schemas;
-   * llama.cpp parses tool calls and thinking out of the output. Used by agent mode and by
-   * chat with thinking on. Errors are thrown to the caller.
+   * llama.cpp parses tool calls and thinking out of the output, and readReply any thinking it
+   * left behind. Used for every reply from a model with a chat template. Errors are thrown to
+   * the caller.
    */
   const chat = useCallback(async (
     { messages, tools, onContent, onReasoning }: CompletionRequest,
@@ -185,8 +187,8 @@ export function useLlama() {
           messages,
           jinja: true,
           ...(tools ? { tools, tool_choice: 'auto', parallel_tool_calls: false } : {}),
-          // The app's think switch (on by default). 'auto' keeps any reasoning out of `content`
-          // either way.
+          // The app's think switch (on by default): it asks the model to think or not, but a
+          // model can think anyway, so the reply is parsed for thinking either way.
           enable_thinking: thinking,
           reasoning_format: 'auto',
           n_predict: N_PREDICT,
@@ -195,13 +197,19 @@ export function useLlama() {
         // Both fields are the parsed text so far, with tool-call and thinking markup removed.
         (data) => {
           noteReplyToken();
-          if (data.reasoning_content !== undefined) onReasoning?.(data.reasoning_content);
-          if (data.content !== undefined) onContent(data.content);
+          const { content, reasoning } = readReply(data, true);
+          if (reasoning) onReasoning?.(reasoning);
+          if (content) onContent(content);
         }
       );
+      const { content, reasoning } = readReply({
+        // `content` is left out when empty, and `text` is the raw output, thinking included.
+        content: result.content ?? (result.reasoning_content ? '' : result.text),
+        reasoning_content: result.reasoning_content,
+      });
       return {
-        content: result.content ?? result.text ?? '',
-        reasoning: result.reasoning_content ?? '',
+        content,
+        reasoning,
         toolCalls: result.tool_calls ?? [],
         interrupted: result.interrupted,
       };

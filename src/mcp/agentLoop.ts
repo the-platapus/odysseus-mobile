@@ -66,6 +66,8 @@ export type RunAgentOptions = {
   manager: McpManager;
   messages: ChatMessage[];
   disabled?: DisabledMap;
+  /** The tools to offer in every round (see routeTools). Default: all enabled tools. */
+  tools?: OpenAITool[];
   maxRounds?: number;
   /** false = a plain templated chat turn: one round, no tools offered. Default true. */
   offerTools?: boolean;
@@ -103,6 +105,7 @@ export async function runAgentTurn(options: RunAgentOptions): Promise<{ messages
   const offerTools = options.offerTools ?? true;
   const maxRounds = offerTools ? options.maxRounds ?? DEFAULT_MAX_ROUNDS : 0;
   const isStopped = options.isStopped ?? (() => false);
+  const offered = options.tools ?? manager.getOpenAITools(disabled);
   const history: ChatMessage[] = [...options.messages];
   const added: ChatMessage[] = [];
   const push = (message: ChatMessage) => {
@@ -165,7 +168,7 @@ export async function runAgentTurn(options: RunAgentOptions): Promise<{ messages
     if (isStopped()) return finish('stopped');
     // The extra round has no tools: the model must answer from what it has.
     const finalRound = forceFinal || round > maxRounds;
-    const tools = finalRound ? [] : manager.getOpenAITools(disabled);
+    const tools = finalRound ? [] : offered;
     onEvent({ type: 'round_start', round });
 
     const response = await complete({
@@ -232,14 +235,14 @@ export function trimHistory(messages: ChatMessage[], maxChars: number): ChatMess
 }
 
 /** Agent-mode system prompt: the user's prompt plus short tool guidance and server instructions. */
-export function buildAgentSystemPrompt(basePrompt: string, manager: McpManager, disabled: DisabledMap = {}, now = new Date()): string {
+export function buildAgentSystemPrompt(basePrompt: string, manager: McpManager, tools: OpenAITool[], now = new Date()): string {
   const lines = [
     basePrompt.trim(),
     '',
     'You can call tools. Use one only when it helps with the request; otherwise answer directly. ' +
       'After a tool returns, use its result to answer the user.',
   ];
-  const enabled = new Set(manager.getOpenAITools(disabled).map((t) => t.function.name.split('__')[1]));
+  const enabled = new Set(tools.map((t) => t.function.name.split('__')[1]));
   for (const [id, state] of Object.entries(manager.getAllStates())) {
     if (state.status !== 'connected' || !enabled.has(id) || !state.instructions) continue;
     // Server instructions come from the server, so keep them short like tool descriptions.

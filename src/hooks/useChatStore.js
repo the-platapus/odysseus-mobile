@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { splitSavedThinking } from '../chat/thinking';
 
 const SESSIONS_INDEX_KEY = 'ody_sessions_index';
 const SESSION_PREFIX = 'ody_session_';
@@ -7,10 +8,12 @@ const SESSION_PREFIX = 'ody_session_';
 // Generate a simple unique ID
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 
+const parseLog = (data) => (data ? JSON.parse(data).map(splitSavedThinking) : []);
+
 // Read any saved conversation without opening it (used by Export chat)
 export async function readSessionLog(id) {
   const data = await AsyncStorage.getItem(SESSION_PREFIX + id);
-  return data ? JSON.parse(data) : [];
+  return parseLog(data);
 }
 
 export function useChatStore() {
@@ -68,7 +71,7 @@ export function useChatStore() {
   const loadSession = async (id) => {
     try {
       const data = await AsyncStorage.getItem(SESSION_PREFIX + id);
-      const loadedLog = data ? JSON.parse(data) : [];
+      const loadedLog = parseLog(data);
       setCurrentSessionId(id);
       setChatLog(loadedLog);
     } catch (e) {

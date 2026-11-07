@@ -27,6 +27,7 @@ import { useChatStore, readSessionLog } from './src/hooks/useChatStore';
 import { usePersona } from './src/hooks/usePersona';
 import PersonaPanel from './src/components/PersonaPanel';
 import { shareChatExport } from './src/chat/exportChat';
+import { splitThinking } from './src/chat/thinking';
 import { useMcp } from './src/hooks/useMcp';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookbookMenu from './src/components/CookbookMenu';
@@ -40,6 +41,7 @@ import ThemePanel from './src/components/ThemePanel';
 import LoadingWave from './src/components/LoadingWave';
 import { ElapsedText, FirstTokenWait } from './src/components/ResponseTimer';
 import { runAgentTurn, buildAgentSystemPrompt, trimHistory } from './src/mcp/agentLoop';
+import { routeTools } from './src/mcp/toolRouter';
 import { chatLogToMessages } from './src/mcp/chatLog';
 import { setAgentMode } from './src/mcp/runtime';
 import { COMFORTABLE_RAM_SHARE, pickGgufFile } from './src/cookbook/ggufPicker';
@@ -840,8 +842,10 @@ export default function App() {
     stopRequestedRef.current = false;
     setIsAgentRunning(true);
 
-    const system = offerTools ? buildAgentSystemPrompt(personas.systemPrompt, mcp.manager, mcp.disabled) : personas.systemPrompt;
-    const messages = trimHistory(chatLogToMessages([...currentLog, { role: 'user', text: userMsg }], system), AGENT_HISTORY_CHARS);
+    const log = [...currentLog, { role: 'user', text: userMsg }];
+    const tools = offerTools ? routeTools(mcp.manager, chatLogToMessages(log, ''), mcp.disabled) : [];
+    const system = offerTools ? buildAgentSystemPrompt(personas.systemPrompt, mcp.manager, tools) : personas.systemPrompt;
+    const messages = trimHistory(chatLogToMessages(log, system), AGENT_HISTORY_CHARS);
     const reply = startReplyWork(userMsg);
     let replyText = '';
 
@@ -904,6 +908,7 @@ export default function App() {
         manager: mcp.manager,
         messages,
         disabled: mcp.disabled,
+        tools,
         offerTools,
         requestApproval: (call) => new Promise(resolve => {
           if (stopRequestedRef.current || !isLive()) return resolve(false);
@@ -975,16 +980,14 @@ export default function App() {
         let replyText = '';
         await generate(prompt, (token) => {
           replyText += token;
-          reply.update(replyText);
-          setChatLog(prev => {
-            const newLog = [...prev];
-            const lastIndex = newLog.length - 1;
-            newLog[lastIndex].text += token;
-            return newLog;
-          });
+          const { content, reasoning } = splitThinking(replyText, true);
+          reply.update(content || reasoning);
+          updateLastAssistant({ text: content, ...(reasoning ? { reasoning } : {}) });
           scrollViewRef.current?.scrollToEnd({ animated: false });
         }, { temperature: personas.temperature });
-        reply.finish(replyText);
+        const { content, reasoning } = splitThinking(replyText);
+        updateLastAssistant({ text: content, ...(reasoning ? { reasoning } : {}) });
+        reply.finish(content);
       }
     } finally {
       const seconds = Math.round((Date.now() - startedAt) / 100) / 10;

@@ -83,6 +83,7 @@ export function createFilesystemServer(fs: FsAdapter): McpServer {
     {
       name: 'list_directory',
       description: 'List the files and folders in a folder. Use "/" for the top level.',
+      keywords: 'files folder folders workspace directory documents show list browse',
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: 'object',
@@ -109,6 +110,7 @@ export function createFilesystemServer(fs: FsAdapter): McpServer {
     {
       name: 'read_file',
       description: 'Read a text file. For long files, pass offset (first line, 1-based) and limit (number of lines).',
+      keywords: 'open read file contents show txt md notes look view',
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: 'object',
@@ -138,6 +140,7 @@ export function createFilesystemServer(fs: FsAdapter): McpServer {
     {
       name: 'write_file',
       description: 'Create or overwrite a text file with the given content. Missing folders are created.',
+      keywords: 'create make new save write file note txt md document',
       annotations: { readOnlyHint: false, destructiveHint: true },
       inputSchema: {
         type: 'object',
@@ -160,6 +163,7 @@ export function createFilesystemServer(fs: FsAdapter): McpServer {
     {
       name: 'edit_file',
       description: 'Replace one exact, unique piece of text in a file with new text.',
+      keywords: 'edit change update fix replace modify rename file line',
       annotations: { readOnlyHint: false, destructiveHint: true },
       inputSchema: {
         type: 'object',
@@ -185,6 +189,7 @@ export function createFilesystemServer(fs: FsAdapter): McpServer {
     {
       name: 'create_directory',
       description: 'Create a folder (and any missing parent folders).',
+      keywords: 'make new folder directory mkdir',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       inputSchema: {
         type: 'object',
@@ -203,6 +208,7 @@ export function createFilesystemServer(fs: FsAdapter): McpServer {
     {
       name: 'delete_path',
       description: 'Delete a file, or a folder and everything in it. This cannot be undone.',
+      keywords: 'delete remove trash erase file folder get rid',
       annotations: { readOnlyHint: false, destructiveHint: true },
       inputSchema: {
         type: 'object',
@@ -221,6 +227,7 @@ export function createFilesystemServer(fs: FsAdapter): McpServer {
     {
       name: 'search_files',
       description: 'Find files whose name or text content contains a word or phrase (case-insensitive).',
+      keywords: 'find search grep look mentions contains talks which file text files',
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: 'object',

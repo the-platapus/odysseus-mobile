@@ -1,0 +1,27 @@
+# Runs the unit tests. They only import this repo's own files, so there's no install step
+# (llama.rn alone is 12 GB of node_modules).
+
+name: Tests
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - '.github/workflows/tests.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - '.github/workflows/tests.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun run test
